@@ -38,6 +38,10 @@ inline constexpr bool isAligned(uptr X, uptr Alignment) {
   return (X & (Alignment - 1)) == 0;
 }
 
+inline constexpr uptr divRoundUp(uptr X, uptr Y) {
+  return roundUpTo(X,Y) / Y;
+}
+
 template <class T> constexpr T Min(T A, T B) { return A < B ? A : B; }
 
 template <class T> constexpr T Max(T A, T B) { return A > B ? A : B; }

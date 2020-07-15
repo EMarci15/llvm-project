@@ -9,6 +9,7 @@
 #ifndef SCUDO_PRIMARY64_H_
 #define SCUDO_PRIMARY64_H_
 
+#include "bitvector.h"
 #include "bytemap.h"
 #include "common.h"
 #include "list.h"
@@ -95,6 +96,8 @@ public:
 
     if (SupportsMemoryTagging)
       UseMemoryTagging = systemSupportsMemoryTagging();
+
+    activePages.init(PrimaryBase, PrimarySize, PageSize);
   }
   void init(s32 ReleaseToOsInterval) {
     memset(this, 0, sizeof(*this));
@@ -164,6 +167,21 @@ public:
     }
   }
 
+  template <typename F> void iterateOverActivePages(F Callback) {
+    for (uptr I = 0; I < NumClasses; I++) {
+      if (I == SizeClassMap::BatchClassId)
+        continue;
+      const RegionInfo *Region = getRegionInfo(I);
+      const uptr From = Region->RegionBeg;
+      const uptr To = From + Region->AllocatedUser;
+      const uptr PageSize = getPageSizeCached();
+      for (uptr Page = From; Page < To; Page += PageSize) {
+        if (activePages[Page])
+            Callback(Page);
+      }
+    }
+  }
+
   void getStats(ScopedString *Str) {
     // TODO(kostyak): get the RSS per region.
     uptr TotalMapped = 0;
@@ -202,6 +220,10 @@ public:
       TotalReleasedBytes += releaseToOSMaybe(Region, I, /*Force=*/true);
     }
     return TotalReleasedBytes;
+  }
+
+  void activatePage(uptr page) {
+    activePages.set(page);
   }
 
   bool useMemoryTagging() const {
@@ -307,6 +329,7 @@ private:
   atomic_s32 ReleaseToOsIntervalMs;
   bool UseMemoryTagging;
   alignas(SCUDO_CACHE_LINE_SIZE) RegionInfo RegionInfoArray[NumClasses];
+  alignas(SCUDO_CACHE_LINE_SIZE) ShadowBitMap activePages;
 
   RegionInfo *getRegionInfo(uptr ClassId) {
     DCHECK_LT(ClassId, NumClasses);
@@ -469,7 +492,7 @@ private:
       }
     }
 
-    ReleaseRecorder Recorder(Region->RegionBeg, &Region->Data);
+    ReleaseRecorder Recorder(Region->RegionBeg, &activePages, &Region->Data);
     releaseFreeMemoryToOS(Region->FreeList, Region->RegionBeg,
                           Region->AllocatedUser, BlockSize, &Recorder);
 

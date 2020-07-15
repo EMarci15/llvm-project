@@ -308,12 +308,14 @@ public:
         else
           ClassId = 0;
       }
+      Primary.activatePage((uptr)Block);
       if (UnlockRequired)
         TSD->unlock();
     }
-    if (UNLIKELY(ClassId == 0))
+    if (UNLIKELY(ClassId == 0)) {
       Block = Secondary.allocate(NeededSize, Alignment, &SecondaryBlockEnd,
                                  FillContents);
+    }
 
     if (UNLIKELY(!Block)) {
       if (Options.MayReturnNull)
@@ -659,6 +661,26 @@ public:
 #ifdef GWP_ASAN_HOOKS
     GuardedAlloc.iterate(reinterpret_cast<void *>(Base), Size, Callback, Arg);
 #endif
+  }
+
+  // Iterate over all active memory: i.e. memory that is allocated or has not been released
+  // since its last deallocation
+  template<typename f>
+  void iterateOverActiveMemory(f Callback) {
+    initThreadMaybe();
+    const uptr PageSize = getPageSizeCached();
+    const auto PrimaryLambda = [Callback](uptr Page) -> void { Callback(Page, PageSize); };
+    const auto SecondaryLambda = [Callback](uptr Ptr) -> void {
+        LargeBlock::Header* H = LargeBlock::getHeader(Ptr);
+        uptr End = H->BlockEnd;
+        uptr Size = End - Ptr;
+        Callback(Ptr, Size);
+    };
+
+    Primary.iterateOverActivePages(PrimaryLambda);
+    Secondary.disable();
+    Secondary.iterateOverBlocks(SecondaryLambda);
+    Secondary.enable();
   }
 
   bool canReturnNull() {

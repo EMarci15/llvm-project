@@ -49,6 +49,7 @@ endif()
 set(SCUDO_HEADERS
   allocator_config.h
   atomic_helpers.h
+  bitvector.h
   bytemap.h
   checksum.h
   chunk.h

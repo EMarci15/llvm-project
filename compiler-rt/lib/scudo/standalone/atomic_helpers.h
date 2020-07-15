@@ -134,6 +134,20 @@ inline typename T::Type atomic_compare_exchange(volatile T *A,
   return Cmp;
 }
 
+template <typename T>
+inline typename T::Type atomic_or_fetch(volatile T *A,
+                                        typename T::Type val,
+                                        memory_order MO = memory_order_relaxed) {
+    return __atomic_or_fetch(&A->ValDoNotUse, val, MO);
+}
+
+template <typename T>
+inline typename T::Type atomic_and_fetch(volatile T *A,
+                                         typename T::Type val,
+                                         memory_order MO = memory_order_relaxed) {
+    return __atomic_and_fetch(&A->ValDoNotUse, val, MO);
+}
+
 } // namespace scudo
 
 #endif // SCUDO_ATOMIC_H_
