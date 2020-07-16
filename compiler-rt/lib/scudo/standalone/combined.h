@@ -80,51 +80,21 @@ public:
         Allocator.Secondary.deallocate(BlockBegin);
     }
 
-    // We take a shortcut when allocating a quarantine batch by working with the
-    // appropriate class ID instead of using Size. The compiler should optimize
-    // the class ID computation and work with the associated cache directly.
-    void *allocate(UNUSED uptr Size) {
-      const uptr QuarantineClassId = SizeClassMap::getClassIdBySize(
-          sizeof(QuarantineBatch) + Chunk::getHeaderSize());
-      void *Ptr = Cache.allocate(QuarantineClassId);
-      // Quarantine batch allocation failure is fatal.
-      if (UNLIKELY(!Ptr))
-        reportOutOfMemory(SizeClassMap::getSizeByClassId(QuarantineClassId));
-
-      Ptr = reinterpret_cast<void *>(reinterpret_cast<uptr>(Ptr) +
-                                     Chunk::getHeaderSize());
-      Chunk::UnpackedHeader Header = {};
-      Header.ClassId = QuarantineClassId & Chunk::ClassIdMask;
-      Header.SizeOrUnusedBytes = sizeof(QuarantineBatch);
-      Header.State = Chunk::State::Allocated;
-      Chunk::storeHeader(Allocator.Cookie, Ptr, &Header);
-
+    void *allocate(uptr Size) {
+      DCHECK_EQ(Size, sizeof(QuarantineBatch));
+      void *Ptr = map(nullptr, BatchAllocSize, "scudo:quarantine");
+      // TODO(marton) Should we cache these?
       return Ptr;
     }
 
     void deallocate(void *Ptr) {
-      const uptr QuarantineClassId = SizeClassMap::getClassIdBySize(
-          sizeof(QuarantineBatch) + Chunk::getHeaderSize());
-      Chunk::UnpackedHeader Header;
-      Chunk::loadHeader(Allocator.Cookie, Ptr, &Header);
-
-      if (UNLIKELY(Header.State != Chunk::State::Allocated))
-        reportInvalidChunkState(AllocatorAction::Deallocating, Ptr);
-      DCHECK_EQ(Header.ClassId, QuarantineClassId);
-      DCHECK_EQ(Header.Offset, 0);
-      DCHECK_EQ(Header.SizeOrUnusedBytes, sizeof(QuarantineBatch));
-
-      Chunk::UnpackedHeader NewHeader = Header;
-      NewHeader.State = Chunk::State::Available;
-      Chunk::compareExchangeHeader(Allocator.Cookie, Ptr, &NewHeader, &Header);
-      Cache.deallocate(QuarantineClassId,
-                       reinterpret_cast<void *>(reinterpret_cast<uptr>(Ptr) -
-                                                Chunk::getHeaderSize()));
+      unmap(Ptr, BatchAllocSize);
     }
 
   private:
     ThisT &Allocator;
     CacheT &Cache;
+    const uptr BatchAllocSize = roundUpTo(sizeof(QuarantineBatch), getPageSizeCached());
   };
 
   typedef GlobalQuarantine<QuarantineCallback, void> QuarantineT;
@@ -162,9 +132,7 @@ public:
     Primary.initLinkerInitialized(ReleaseToOsIntervalMs);
     Secondary.initLinkerInitialized(&Stats, ReleaseToOsIntervalMs);
 
-    Quarantine.init(
-        static_cast<uptr>(getFlags()->quarantine_size_kb << 10),
-        static_cast<uptr>(getFlags()->thread_local_quarantine_size_kb << 10));
+    Quarantine.init(static_cast<uptr>(getFlags()->thread_local_quarantine_size_kb << 10));
   }
 
   // Initialize the embedded GWP-ASan instance. Requires the main allocator to
@@ -1014,8 +982,7 @@ private:
     // than the maximum allowed, we return a chunk directly to the backend.
     // Logical Or can be short-circuited, which introduces unnecessary
     // conditional jumps, so use bitwise Or and let the compiler be clever.
-    const bool BypassQuarantine = !Quarantine.getCacheSize() | !Size |
-                                  (Size > Options.QuarantineMaxChunkSize);
+    const bool BypassQuarantine = !Quarantine.getCacheSize() | !Size;
     if (BypassQuarantine) {
       NewHeader.State = Chunk::State::Available;
       Chunk::compareExchangeHeader(Cookie, Ptr, &NewHeader, Header);

@@ -18,15 +18,17 @@ namespace scudo {
 struct QuarantineBatch {
   // With the following count, a batch (and the header that protects it) occupy
   // 4096 bytes on 32-bit platforms, and 8192 bytes on 64-bit.
-  static const u32 MaxCount = 1019;
+  static const u32 MaxCount = 509;
   QuarantineBatch *Next;
   uptr Size;
   u32 Count;
-  void *Batch[MaxCount];
+  void *Ptrs[MaxCount];
+  uptr Sizes[MaxCount];
 
   void init(void *Ptr, uptr Size) {
     Count = 1;
-    Batch[0] = Ptr;
+    Ptrs[0] = Ptr;
+    Sizes[0] = Size;
     this->Size = Size + sizeof(QuarantineBatch); // Account for the Batch Size.
   }
 
@@ -35,7 +37,8 @@ struct QuarantineBatch {
 
   void push_back(void *Ptr, uptr Size) {
     DCHECK_LT(Count, MaxCount);
-    Batch[Count++] = Ptr;
+    Ptrs[Count] = Ptr;
+    Sizes[Count++] = Size;
     this->Size += Size;
   }
 
@@ -47,16 +50,16 @@ struct QuarantineBatch {
     DCHECK_LE(Count + From->Count, MaxCount);
     DCHECK_GE(Size, sizeof(QuarantineBatch));
 
-    for (uptr I = 0; I < From->Count; ++I)
-      Batch[Count + I] = From->Batch[I];
+    for (uptr I = 0; I < From->Count; ++I) {
+      Ptrs[Count + I] = From->Ptrs[I];
+      Sizes[Count + I] = From->Sizes[I];
+    }
     Count += From->Count;
     Size += From->getQuarantinedSize();
 
     From->Count = 0;
     From->Size = sizeof(QuarantineBatch);
   }
-
-  void shuffle(u32 State) { ::scudo::shuffle(Batch, Count, &State); }
 };
 
 static_assert(sizeof(QuarantineBatch) <= (1U << 13), ""); // 8Kb.
@@ -175,28 +178,22 @@ template <typename Callback, typename Node> class GlobalQuarantine {
 public:
   typedef QuarantineCache<Callback> CacheT;
 
-  void initLinkerInitialized(uptr Size, uptr CacheSize) {
-    // Thread local quarantine size can be zero only when global quarantine size
-    // is zero (it allows us to perform just one atomic read per put() call).
-    CHECK((Size == 0 && CacheSize == 0) || CacheSize != 0);
-
-    atomic_store_relaxed(&MaxSize, Size);
-    atomic_store_relaxed(&MinSize, Size / 10 * 9); // 90% of max size.
+  void initLinkerInitialized(uptr CacheSize) {
     atomic_store_relaxed(&MaxCacheSize, CacheSize);
 
     Cache.initLinkerInitialized();
   }
-  void init(uptr Size, uptr CacheSize) {
+  void init(uptr CacheSize) {
     CacheMutex.init();
     Cache.init();
     RecycleMutex.init();
-    MinSize = {};
-    MaxSize = {};
     MaxCacheSize = {};
-    initLinkerInitialized(Size, CacheSize);
+    initLinkerInitialized(CacheSize);
   }
 
-  uptr getMaxSize() const { return atomic_load_relaxed(&MaxSize); }
+  uptr getMaxSize() const {
+    return 10*1024; // TODO(marton) obtain RSS and use relative threshold
+  }
   uptr getCacheSize() const { return atomic_load_relaxed(&MaxCacheSize); }
 
   void put(CacheT *C, Callback Cb, Node *Ptr, uptr Size) {
@@ -211,7 +208,7 @@ public:
       Cache.transfer(C);
     }
     if (Cache.getSize() > getMaxSize() && RecycleMutex.tryLock())
-      recycle(atomic_load_relaxed(&MinSize), Cb);
+      recycle(Cb);
   }
 
   void NOINLINE drainAndRecycle(CacheT *C, Callback Cb) {
@@ -220,7 +217,7 @@ public:
       Cache.transfer(C);
     }
     RecycleMutex.lock();
-    recycle(0, Cb);
+    recycle(Cb);
   }
 
   void getStats(ScopedString *Str) const {
@@ -246,20 +243,16 @@ private:
   alignas(SCUDO_CACHE_LINE_SIZE) HybridMutex CacheMutex;
   CacheT Cache;
   alignas(SCUDO_CACHE_LINE_SIZE) HybridMutex RecycleMutex;
-  atomic_uptr MinSize;
   atomic_uptr MaxSize;
   alignas(SCUDO_CACHE_LINE_SIZE) atomic_uptr MaxCacheSize;
 
-  void NOINLINE recycle(uptr MinSize, Callback Cb) {
+  void NOINLINE recycle(Callback Cb) {
     CacheT Tmp;
     Tmp.init();
     {
       ScopedLock L(CacheMutex);
       // Go over the batches and merge partially filled ones to
-      // save some memory, otherwise batches themselves (since the memory used
-      // by them is counted against quarantine limit) can overcome the actual
-      // user's quarantined chunks, which diminishes the purpose of the
-      // quarantine.
+      // save some memory.
       const uptr CacheSize = Cache.getSize();
       const uptr OverheadSize = Cache.getOverheadSize();
       DCHECK_GE(CacheSize, OverheadSize);
@@ -267,36 +260,51 @@ private:
       // require some tuning). It saves us merge attempt when the batch list
       // quarantine is unlikely to contain batches suitable for merge.
       constexpr uptr OverheadThresholdPercents = 100;
-      if (CacheSize > OverheadSize &&
-          OverheadSize * (100 + OverheadThresholdPercents) >
+      if (OverheadSize * (100 + OverheadThresholdPercents) >
               CacheSize * OverheadThresholdPercents) {
         Cache.mergeBatches(&Tmp);
       }
-      // Extract enough chunks from the quarantine to get below the max
-      // quarantine size and leave some leeway for the newly quarantined chunks.
-      while (Cache.getSize() > MinSize)
-        Tmp.enqueueBatch(Cache.dequeueBatch());
+
+      // Remove batches from cache
+      Tmp.transfer(&Cache);
     }
     RecycleMutex.unlock();
-    doRecycle(&Tmp, Cb);
+
+    sweepAndRecycle(&Tmp, Cb);
   }
 
-  void NOINLINE doRecycle(CacheT *C, Callback Cb) {
+  void NOINLINE sweepAndRecycle(CacheT *C, Callback Cb) {
+    // TODO(marton) Sweep and implement marked(Ptr)
+
+    CacheT ToReinsert;
     while (QuarantineBatch *B = C->dequeueBatch()) {
-      const u32 Seed = static_cast<u32>(
-          (reinterpret_cast<uptr>(B) ^ reinterpret_cast<uptr>(C)) >> 4);
-      B->shuffle(Seed);
       constexpr uptr NumberOfPrefetch = 8UL;
-      CHECK(NumberOfPrefetch <= ARRAY_SIZE(B->Batch));
-      for (uptr I = 0; I < NumberOfPrefetch; I++)
-        PREFETCH(B->Batch[I]);
+      CHECK(NumberOfPrefetch <= ARRAY_SIZE(B->Ptrs));
+      for (uptr I = 0; I < NumberOfPrefetch; I++) {
+        PREFETCH(B->Ptrs[I]);
+        PREFETCH(B->Sizes[I]);
+      }
       for (uptr I = 0, Count = B->Count; I < Count; I++) {
-        if (I + NumberOfPrefetch < Count)
-          PREFETCH(B->Batch[I + NumberOfPrefetch]);
-        Cb.recycle(reinterpret_cast<Node *>(B->Batch[I]));
+        if (I + NumberOfPrefetch < Count) {
+          PREFETCH(B->Ptrs[I + NumberOfPrefetch]);
+          PREFETCH(B->Sizes[I + NumberOfPrefetch]);
+        }
+
+        void* Ptr = B->Ptrs[I];
+        uptr Size = B->Sizes[I];
+        if (false) { // TODO(marton) if (marked(Ptr, Size))
+          // Dirty => collect for reinsertion
+          ToReinsert.enqueue(Cb, Ptr, Size);
+        } else {
+          // Clean => recycle
+          Cb.recycle(reinterpret_cast<Node *>(B->Ptrs[I]));
+        }
       }
       Cb.deallocate(B);
     }
+
+    // Reinsert "failed frees"
+    Cache.transfer(&ToReinsert);
   }
 };
 
