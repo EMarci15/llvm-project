@@ -635,6 +635,10 @@ public:
     Secondary.enable();
   }
 
+  uptr getTotalAllocatedUser() {
+    return Primary.getTotalAllocatedUser() + Secondary.getTotalAllocatedUser();
+  }
+
   bool canReturnNull() {
     initThreadMaybe();
     return Options.MayReturnNull;

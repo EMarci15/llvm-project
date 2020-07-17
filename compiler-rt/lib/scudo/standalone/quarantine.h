@@ -216,7 +216,7 @@ public:
   }
 
   uptr getMaxSize() const {
-    return 10*1024; // TODO(marton) obtain RSS and use relative threshold
+    return SweepThreshold * Allocator->getTotalAllocatedUser() / 100;
   }
   uptr getCacheSize() const { return atomic_load_relaxed(&MaxCacheSize); }
 
@@ -294,6 +294,7 @@ private:
   AllocatorT *Allocator;
   atomic_uptr MaxSize;
   alignas(SCUDO_CACHE_LINE_SIZE) atomic_uptr MaxCacheSize;
+  uptr SweepThreshold = /* Sweep when */25/* % of all allocated memory is quarantined. */;
   // Sweeper thread
   pthread_t SweeperThread;
   volatile bool SweeperThreadLaunched;

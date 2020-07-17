@@ -203,6 +203,15 @@ public:
       getStats(Str, I, 0);
   }
 
+  uptr getTotalAllocatedUser() {
+    uptr TotalAllocatedUser = 0;
+    for (uptr I = 0; I < NumClasses; I++) {
+      RegionInfo *Region = getRegionInfo(I);
+      TotalAllocatedUser += Region->AllocatedUser;
+    }
+    return TotalAllocatedUser;
+  }
+
   void setReleaseToOsIntervalMs(s32 Interval) {
     if (Interval >= MaxReleaseToOsIntervalMs) {
       Interval = MaxReleaseToOsIntervalMs;

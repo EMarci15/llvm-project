@@ -273,6 +273,8 @@ public:
 
   void releaseToOS() { Cache.releaseToOS(); }
 
+  uptr getTotalAllocatedUser() { return AllocatedBytes; }
+
 private:
   CacheT Cache;
 
