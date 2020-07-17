@@ -12,6 +12,7 @@
 #include "list.h"
 #include "mutex.h"
 #include "string_utils.h"
+#include "pthread.h"
 
 namespace scudo {
 
@@ -24,6 +25,22 @@ struct QuarantineBatch {
   u32 Count;
   void *Ptrs[MaxCount];
   uptr Sizes[MaxCount];
+
+  static QuarantineBatch *getNewInstance(void *Ptr, uptr Size) {
+    const static uptr BatchAllocSize = roundUpTo(sizeof(QuarantineBatch), getPageSizeCached());
+    // TODO(marton) Should we cache these?
+    QuarantineBatch *Instance =
+          (QuarantineBatch*)map(nullptr, BatchAllocSize, "scudo:quarantine");
+    DCHECK(Instance);
+    
+    Instance->init(Ptr, Size);
+    return Instance;
+  }
+
+  static void deallocate(QuarantineBatch *Instance) {
+    const static uptr BatchAllocSize = roundUpTo(sizeof(QuarantineBatch), getPageSizeCached());
+    unmap((void*)Instance, BatchAllocSize);
+  }
 
   void init(void *Ptr, uptr Size) {
     Count = 1;
@@ -65,7 +82,7 @@ struct QuarantineBatch {
 static_assert(sizeof(QuarantineBatch) <= (1U << 13), ""); // 8Kb.
 
 // Per-thread cache of memory blocks.
-template <typename Callback> class QuarantineCache {
+class QuarantineCache {
 public:
   void initLinkerInitialized() {}
   void init() {
@@ -78,13 +95,9 @@ public:
   // Memory used for internal accounting.
   uptr getOverheadSize() const { return List.size() * sizeof(QuarantineBatch); }
 
-  void enqueue(Callback Cb, void *Ptr, uptr Size) {
+  void enqueue(void *Ptr, uptr Size) {
     if (List.empty() || List.back()->Count == QuarantineBatch::MaxCount) {
-      QuarantineBatch *B =
-          reinterpret_cast<QuarantineBatch *>(Cb.allocate(sizeof(*B)));
-      DCHECK(B);
-      B->init(Ptr, Size);
-      enqueueBatch(B);
+      enqueueBatch(QuarantineBatch::getNewInstance(Ptr, Size));
     } else {
       List.back()->push_back(Ptr, Size);
       addToSize(Size);
@@ -170,20 +183,27 @@ private:
   void subFromSize(uptr sub) { atomic_store_relaxed(&Size, getSize() - sub); }
 };
 
-// The callback interface is:
-// void Callback::recycle(Node *Ptr);
-// void *Callback::allocate(uptr Size);
-// void Callback::deallocate(void *Ptr);
-template <typename Callback, typename Node> class GlobalQuarantine {
+template<typename QuarantineT>
+void *sweeperThreadStart(void *QuarantinePtr) {
+  QuarantineT *Quarantine = (QuarantineT*)QuarantinePtr;
+  Quarantine->sweeperThreadMain();
+  pthread_exit(NULL);
+}
+
+template <typename AllocatorT, typename Node> class GlobalQuarantine {
 public:
-  typedef QuarantineCache<Callback> CacheT;
+  typedef QuarantineCache CacheT;
+  typedef GlobalQuarantine<AllocatorT, Node> ThisT;
 
   void initLinkerInitialized(uptr CacheSize) {
     atomic_store_relaxed(&MaxCacheSize, CacheSize);
-
     Cache.initLinkerInitialized();
+
+    pthread_cond_init(&SweeperCondition, NULL);
+    pthread_mutex_init(&SweeperMutex, NULL);
   }
-  void init(uptr CacheSize) {
+  void init(AllocatorT *Allocator, uptr CacheSize) {
+    this->Allocator = Allocator;
     CacheMutex.init();
     Cache.init();
     RecycleMutex.init();
@@ -191,33 +211,37 @@ public:
     initLinkerInitialized(CacheSize);
   }
 
+  ~GlobalQuarantine() {
+    killSweeperThread();
+  }
+
   uptr getMaxSize() const {
     return 10*1024; // TODO(marton) obtain RSS and use relative threshold
   }
   uptr getCacheSize() const { return atomic_load_relaxed(&MaxCacheSize); }
 
-  void put(CacheT *C, Callback Cb, Node *Ptr, uptr Size) {
-    C->enqueue(Cb, Ptr, Size);
+  void put(CacheT *C, Node *Ptr, uptr Size) {
+    C->enqueue(Ptr, Size);
     if (C->getSize() > getCacheSize())
-      drain(C, Cb);
+      drain(C);
   }
 
-  void NOINLINE drain(CacheT *C, Callback Cb) {
+  void NOINLINE drain(CacheT *C) {
     {
       ScopedLock L(CacheMutex);
       Cache.transfer(C);
     }
     if (Cache.getSize() > getMaxSize() && RecycleMutex.tryLock())
-      recycle(Cb);
+      recycle();
   }
 
-  void NOINLINE drainAndRecycle(CacheT *C, Callback Cb) {
+  void NOINLINE drainAndRecycle(CacheT *C) {
     {
       ScopedLock L(CacheMutex);
       Cache.transfer(C);
     }
     RecycleMutex.lock();
-    recycle(Cb);
+    recycle();
   }
 
   void getStats(ScopedString *Str) const {
@@ -238,17 +262,69 @@ public:
     RecycleMutex.unlock();
   }
 
+  // Point of entry for SweeperThread
+  void sweeperThreadMain() {
+    // Repeat until program exit
+    while (true) {
+      // Wait until sweep is needed or program is shutting down
+      bool SweepNeeded, ShutdownNeeded;
+      pthread_mutex_lock(&SweeperMutex);
+      while (true) {
+        ShutdownNeeded = ShutdownSignal;
+        SweepNeeded = Cache.getSize() > getMaxSize();
+        if (ShutdownNeeded | SweepNeeded)
+          break;
+        pthread_cond_wait(&SweeperCondition, &SweeperMutex);
+      }
+      pthread_mutex_unlock(&SweeperMutex);
+
+      if (ShutdownNeeded)
+        return; // Kill thread
+
+      DCHECK(SweepNeeded)
+      doSweepAndRecycle();
+    }
+  }
+
 private:
   // Read-only data.
   alignas(SCUDO_CACHE_LINE_SIZE) HybridMutex CacheMutex;
   CacheT Cache;
   alignas(SCUDO_CACHE_LINE_SIZE) HybridMutex RecycleMutex;
+  AllocatorT *Allocator;
   atomic_uptr MaxSize;
   alignas(SCUDO_CACHE_LINE_SIZE) atomic_uptr MaxCacheSize;
+  // Sweeper thread
+  pthread_t SweeperThread;
+  volatile bool SweeperThreadLaunched;
+  pthread_mutex_t SweeperMutex;
+  pthread_cond_t SweeperCondition;
+  volatile bool ShutdownSignal;
 
-  void NOINLINE recycle(Callback Cb) {
-    CacheT Tmp;
-    Tmp.init();
+  void killSweeperThread() {
+    pthread_mutex_lock(&SweeperMutex);
+      ShutdownSignal = true;
+    pthread_mutex_unlock(&SweeperMutex);
+  }
+
+  void recycle() {
+    if (!pthread_mutex_trylock(&SweeperMutex)) {
+      // Launch thread here. We use late initialisation for this to avoid deadlock in init()
+      if (UNLIKELY(!SweeperThreadLaunched)) {
+        SweeperThreadLaunched = true;
+        pthread_create(&SweeperThread, nullptr, &sweeperThreadStart<ThisT>, this);
+      }
+
+      pthread_cond_signal(&SweeperCondition);
+      pthread_mutex_unlock(&SweeperMutex);
+    }
+  }
+
+  void doSweepAndRecycle() {
+    // TODO(marton) Sweep and implement marked(Ptr)
+
+    CacheT ToCheck;
+    ToCheck.init();
     {
       ScopedLock L(CacheMutex);
       // Go over the batches and merge partially filled ones to
@@ -262,22 +338,16 @@ private:
       constexpr uptr OverheadThresholdPercents = 100;
       if (OverheadSize * (100 + OverheadThresholdPercents) >
               CacheSize * OverheadThresholdPercents) {
-        Cache.mergeBatches(&Tmp);
+        Cache.mergeBatches(&ToCheck);
       }
 
       // Remove batches from cache
-      Tmp.transfer(&Cache);
+      ToCheck.transfer(&Cache);
     }
     RecycleMutex.unlock();
 
-    sweepAndRecycle(&Tmp, Cb);
-  }
-
-  void NOINLINE sweepAndRecycle(CacheT *C, Callback Cb) {
-    // TODO(marton) Sweep and implement marked(Ptr)
-
     CacheT ToReinsert;
-    while (QuarantineBatch *B = C->dequeueBatch()) {
+    while (QuarantineBatch *B = ToCheck.dequeueBatch()) {
       constexpr uptr NumberOfPrefetch = 8UL;
       CHECK(NumberOfPrefetch <= ARRAY_SIZE(B->Ptrs));
       for (uptr I = 0; I < NumberOfPrefetch; I++) {
@@ -294,13 +364,13 @@ private:
         uptr Size = B->Sizes[I];
         if (false) { // TODO(marton) if (marked(Ptr, Size))
           // Dirty => collect for reinsertion
-          ToReinsert.enqueue(Cb, Ptr, Size);
+          ToReinsert.enqueue(Ptr, Size);
         } else {
           // Clean => recycle
-          Cb.recycle(reinterpret_cast<Node *>(B->Ptrs[I]));
+          Allocator->recycleChunk(reinterpret_cast<Node *>(B->Ptrs[I]));
         }
       }
-      Cb.deallocate(B);
+      QuarantineBatch::deallocate(B);
     }
 
     // Reinsert "failed frees"

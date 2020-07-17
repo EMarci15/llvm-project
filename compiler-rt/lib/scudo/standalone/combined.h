@@ -56,48 +56,7 @@ public:
     pthread_once(&OnceControl, PostInitCallback);
   }
 
-  struct QuarantineCallback {
-    explicit QuarantineCallback(ThisT &Instance, CacheT &LocalCache)
-        : Allocator(Instance), Cache(LocalCache) {}
-
-    // Chunk recycling function, returns a quarantined chunk to the backend,
-    // first making sure it hasn't been tampered with.
-    void recycle(void *Ptr) {
-      Chunk::UnpackedHeader Header;
-      Chunk::loadHeader(Allocator.Cookie, Ptr, &Header);
-      if (UNLIKELY(Header.State != Chunk::State::Quarantined))
-        reportInvalidChunkState(AllocatorAction::Recycling, Ptr);
-
-      Chunk::UnpackedHeader NewHeader = Header;
-      NewHeader.State = Chunk::State::Available;
-      Chunk::compareExchangeHeader(Allocator.Cookie, Ptr, &NewHeader, &Header);
-
-      void *BlockBegin = Allocator::getBlockBegin(Ptr, &NewHeader);
-      const uptr ClassId = NewHeader.ClassId;
-      if (LIKELY(ClassId))
-        Cache.deallocate(ClassId, BlockBegin);
-      else
-        Allocator.Secondary.deallocate(BlockBegin);
-    }
-
-    void *allocate(uptr Size) {
-      DCHECK_EQ(Size, sizeof(QuarantineBatch));
-      void *Ptr = map(nullptr, BatchAllocSize, "scudo:quarantine");
-      // TODO(marton) Should we cache these?
-      return Ptr;
-    }
-
-    void deallocate(void *Ptr) {
-      unmap(Ptr, BatchAllocSize);
-    }
-
-  private:
-    ThisT &Allocator;
-    CacheT &Cache;
-    const uptr BatchAllocSize = roundUpTo(sizeof(QuarantineBatch), getPageSizeCached());
-  };
-
-  typedef GlobalQuarantine<QuarantineCallback, void> QuarantineT;
+  typedef GlobalQuarantine<ThisT, void> QuarantineT;
   typedef typename QuarantineT::CacheT QuarantineCacheT;
 
   void initLinkerInitialized() {
@@ -132,7 +91,7 @@ public:
     Primary.initLinkerInitialized(ReleaseToOsIntervalMs);
     Secondary.initLinkerInitialized(&Stats, ReleaseToOsIntervalMs);
 
-    Quarantine.init(static_cast<uptr>(getFlags()->thread_local_quarantine_size_kb << 10));
+    Quarantine.init(this, static_cast<uptr>(getFlags()->thread_local_quarantine_size_kb << 10));
   }
 
   // Initialize the embedded GWP-ASan instance. Requires the main allocator to
@@ -189,8 +148,7 @@ public:
   // - unlinking the local stats from the global ones (destroying the cache does
   //   the last two items).
   void commitBack(TSD<ThisT> *TSD) {
-    Quarantine.drain(&TSD->QuarantineCache,
-                     QuarantineCallback(*this, TSD->Cache));
+    Quarantine.drain(&TSD->QuarantineCache);
     TSD->Cache.destroy(&Stats);
   }
 
@@ -540,6 +498,32 @@ public:
       quarantineOrDeallocateChunk(OldPtr, &OldHeader, OldSize);
     }
     return NewPtr;
+  }
+
+  // Chunk recycling function, returns a quarantined chunk to the backend,
+  // first making sure it hasn't been tampered with.
+  void recycleChunk(void *Ptr) {
+    initThreadMaybe(/*MinimalInit=*/true);
+
+    Chunk::UnpackedHeader Header;
+    Chunk::loadHeader(Cookie, Ptr, &Header);
+    if (UNLIKELY(Header.State != Chunk::State::Quarantined))
+      reportInvalidChunkState(AllocatorAction::Recycling, Ptr);
+
+    Chunk::UnpackedHeader NewHeader = Header;
+    NewHeader.State = Chunk::State::Available;
+    Chunk::compareExchangeHeader(Cookie, Ptr, &NewHeader, &Header);
+
+    void *BlockBegin = getBlockBegin(Ptr, &NewHeader);
+    const uptr ClassId = NewHeader.ClassId;
+    if (LIKELY(ClassId)) {
+        bool UnlockRequired;
+        auto *TSD = TSDRegistry.getTSDAndLock(&UnlockRequired);
+        TSD->Cache.deallocate(ClassId, BlockBegin);
+        if (UnlockRequired)
+          TSD->unlock();
+    } else
+      Secondary.deallocate(BlockBegin);
   }
 
   // TODO(kostyak): disable() is currently best-effort. There are some small
@@ -1002,8 +986,7 @@ private:
       Chunk::compareExchangeHeader(Cookie, Ptr, &NewHeader, Header);
       bool UnlockRequired;
       auto *TSD = TSDRegistry.getTSDAndLock(&UnlockRequired);
-      Quarantine.put(&TSD->QuarantineCache,
-                     QuarantineCallback(*this, TSD->Cache), Ptr, Size);
+      Quarantine.put(&TSD->QuarantineCache, Ptr, Size);
       if (UnlockRequired)
         TSD->unlock();
     }
