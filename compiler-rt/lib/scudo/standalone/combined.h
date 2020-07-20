@@ -14,6 +14,7 @@
 #include "flags.h"
 #include "flags_parser.h"
 #include "local_cache.h"
+#include "memory_range_registry.h"
 #include "memtag.h"
 #include "quarantine.h"
 #include "report.h"
@@ -92,6 +93,7 @@ public:
     Secondary.initLinkerInitialized(&Stats, ReleaseToOsIntervalMs);
 
     Quarantine.init(this, static_cast<uptr>(getFlags()->thread_local_quarantine_size_kb << 10));
+    MemRangeRegistry.init();
   }
 
   // Initialize the embedded GWP-ASan instance. Requires the main allocator to
@@ -633,6 +635,7 @@ public:
     Secondary.disable();
     Secondary.iterateOverBlocks(SecondaryLambda);
     Secondary.enable();
+    MemRangeRegistry.iterateRanges(Callback);
   }
 
   uptr getTotalAllocatedUser() {
@@ -882,6 +885,7 @@ private:
   PrimaryT Primary;
   SecondaryT Secondary;
   QuarantineT Quarantine;
+  MemoryRangeRegistry MemRangeRegistry;
 
   u32 Cookie;
 

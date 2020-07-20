@@ -61,10 +61,12 @@ set(SCUDO_HEADERS
   linux.h
   list.h
   local_cache.h
+  memory_range_registry.h
   mutex.h
   platform.h
   primary32.h
   primary64.h
+  proc_maps_parse.h
   quarantine.h
   release.h
   report.h
