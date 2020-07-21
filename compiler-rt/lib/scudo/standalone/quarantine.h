@@ -9,12 +9,16 @@
 #ifndef SCUDO_QUARANTINE_H_
 #define SCUDO_QUARANTINE_H_
 
+#include "bitvector.h"
 #include "list.h"
 #include "mutex.h"
 #include "string_utils.h"
 #include "pthread.h"
 
 namespace scudo {
+
+#define MIN_HEAP_ADDR 0
+#define MAX_HEAP_ADDR (((uptr)1)<<47)
 
 struct QuarantineBatch {
   // With the following count, a batch (and the header that protects it) occupy
@@ -194,6 +198,7 @@ template <typename AllocatorT, typename Node> class GlobalQuarantine {
 public:
   typedef QuarantineCache CacheT;
   typedef GlobalQuarantine<AllocatorT, Node> ThisT;
+  typedef ShadowBitMap ShadowT;
 
   void initLinkerInitialized(uptr CacheSize) {
     atomic_store_relaxed(&MaxCacheSize, CacheSize);
@@ -206,7 +211,6 @@ public:
     this->Allocator = Allocator;
     CacheMutex.init();
     Cache.init();
-    RecycleMutex.init();
     MaxCacheSize = {};
     initLinkerInitialized(CacheSize);
   }
@@ -231,7 +235,7 @@ public:
       ScopedLock L(CacheMutex);
       Cache.transfer(C);
     }
-    if (Cache.getSize() > getMaxSize() && RecycleMutex.tryLock())
+    if (Cache.getSize() > getMaxSize())
       recycle();
   }
 
@@ -240,7 +244,6 @@ public:
       ScopedLock L(CacheMutex);
       Cache.transfer(C);
     }
-    RecycleMutex.lock();
     recycle();
   }
 
@@ -252,18 +255,17 @@ public:
   }
 
   void disable() {
-    // RecycleMutex must be locked 1st since we grab CacheMutex within recycle.
-    RecycleMutex.lock();
     CacheMutex.lock();
   }
 
   void enable() {
     CacheMutex.unlock();
-    RecycleMutex.unlock();
   }
 
   // Point of entry for SweeperThread
   void sweeperThreadMain() {
+    ShadowMap.init(MIN_HEAP_ADDR, MAX_HEAP_ADDR - MIN_HEAP_ADDR, getPageSizeCached());
+
     // Repeat until program exit
     while (true) {
       // Wait until sweep is needed or program is shutting down
@@ -290,17 +292,17 @@ private:
   // Read-only data.
   alignas(SCUDO_CACHE_LINE_SIZE) HybridMutex CacheMutex;
   CacheT Cache;
-  alignas(SCUDO_CACHE_LINE_SIZE) HybridMutex RecycleMutex;
   AllocatorT *Allocator;
   atomic_uptr MaxSize;
   alignas(SCUDO_CACHE_LINE_SIZE) atomic_uptr MaxCacheSize;
-  uptr SweepThreshold = /* Sweep when */25/* % of all allocated memory is quarantined. */;
+  const uptr SweepThreshold = /* Sweep when */25/* % of all allocated memory is quarantined. */;
   // Sweeper thread
   pthread_t SweeperThread;
   volatile bool SweeperThreadLaunched;
   pthread_mutex_t SweeperMutex;
   pthread_cond_t SweeperCondition;
   volatile bool ShutdownSignal;
+  ShadowT ShadowMap;
 
   void killSweeperThread() {
     pthread_mutex_lock(&SweeperMutex);
@@ -322,10 +324,34 @@ private:
   }
 
   void doSweepAndRecycle() {
-    // TODO(marton) Sweep and implement marked(Ptr)
+    doSweepAndMark();
 
-    CacheT ToCheck;
-    ToCheck.init();
+    CacheT ToCheck = gatherContents();
+    CacheT FailedFrees = recycleUnmarked(ToCheck);
+    Cache.transfer(&FailedFrees); // Reinsert failed frees
+
+    ShadowMap.clear();
+  }
+
+  inline void doSweepAndMark() {
+    auto MarkingLambda = [&](uptr Ptr, uptr Size) -> void {
+      uptr* const Begin = (uptr*) Ptr;
+      uptr* const End = (uptr*) (Ptr + Size);
+      for (uptr *Word = Begin; Word < End; Word++) {
+        uptr Target = *Word;
+        // TODO(marton) better quick filtering: only mark if Target is in the plausible range
+        if (Target >= MAX_HEAP_ADDR)
+            continue;
+        ShadowMap.set(Target);
+      }
+    };
+
+    Allocator->iterateOverActiveMemory(MarkingLambda);
+  }
+
+  inline CacheT gatherContents() {
+    CacheT Result;
+    Result.init();
     {
       ScopedLock L(CacheMutex);
       // Go over the batches and merge partially filled ones to
@@ -339,15 +365,20 @@ private:
       constexpr uptr OverheadThresholdPercents = 100;
       if (OverheadSize * (100 + OverheadThresholdPercents) >
               CacheSize * OverheadThresholdPercents) {
-        Cache.mergeBatches(&ToCheck);
+        Cache.mergeBatches(&Result);
       }
 
       // Remove batches from cache
-      ToCheck.transfer(&Cache);
+      Result.transfer(&Cache);
     }
-    RecycleMutex.unlock();
 
-    CacheT ToReinsert;
+    return Result;
+  }
+
+  inline CacheT recycleUnmarked(CacheT &ToCheck) {
+    CacheT FailedFrees;
+    FailedFrees.init();
+
     while (QuarantineBatch *B = ToCheck.dequeueBatch()) {
       constexpr uptr NumberOfPrefetch = 8UL;
       CHECK(NumberOfPrefetch <= ARRAY_SIZE(B->Ptrs));
@@ -361,11 +392,11 @@ private:
           PREFETCH(B->Sizes[I + NumberOfPrefetch]);
         }
 
-        void* Ptr = B->Ptrs[I];
+        void *Ptr = B->Ptrs[I];
         uptr Size = B->Sizes[I];
-        if (false) { // TODO(marton) if (marked(Ptr, Size))
+        if (marked((uptr)Ptr, Size)) {
           // Dirty => collect for reinsertion
-          ToReinsert.enqueue(Ptr, Size);
+          FailedFrees.enqueue(Ptr, Size);
         } else {
           // Clean => recycle
           Allocator->recycleChunk(reinterpret_cast<Node *>(B->Ptrs[I]));
@@ -374,8 +405,11 @@ private:
       QuarantineBatch::deallocate(B);
     }
 
-    // Reinsert "failed frees"
-    Cache.transfer(&ToReinsert);
+    return FailedFrees;
+  }
+
+  inline bool marked(uptr Ptr, uptr Size) {
+    return !ShadowMap.allZero(Ptr, Ptr+Size);
   }
 };
 

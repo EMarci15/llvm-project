@@ -623,7 +623,8 @@ public:
   void iterateOverActiveMemory(f Callback) {
     initThreadMaybe();
     const uptr PageSize = getPageSizeCached();
-    const auto PrimaryLambda = [Callback](uptr Page) -> void { Callback(Page, PageSize); };
+    const auto PrimaryLambda =
+      [Callback, PageSize](uptr Page) -> void { Callback(Page, PageSize); };
     const auto SecondaryLambda = [Callback](uptr Ptr) -> void {
         LargeBlock::Header* H = LargeBlock::getHeader(Ptr);
         uptr End = H->BlockEnd;
