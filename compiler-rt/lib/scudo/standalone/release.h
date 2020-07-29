@@ -31,7 +31,8 @@ public:
     releasePagesToOS(BaseAddress, From, Size, Data);
     ReleasedRangesCount++;
     ReleasedBytes += Size;
-    ActivePages->clear(From, To);
+    // TODO(marton) Is this range guaranteed to be fully committed?
+    ActivePages->clear(BaseAddress+From, BaseAddress+To);
   }
 
 private:

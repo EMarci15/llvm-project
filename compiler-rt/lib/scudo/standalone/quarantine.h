@@ -292,7 +292,7 @@ public:
 
   // Point of entry for SweeperThread
   void sweeperThreadMain() {
-    ShadowMap.init(MIN_HEAP_ADDR, MAX_HEAP_ADDR - MIN_HEAP_ADDR, getPageSizeCached());
+    ShadowMap.init(MIN_HEAP_ADDR, MAX_HEAP_ADDR - MIN_HEAP_ADDR, GranuleSize);
 
     // Repeat until program exit
     while (true) {
@@ -324,6 +324,7 @@ private:
   atomic_uptr MaxSize;
   alignas(SCUDO_CACHE_LINE_SIZE) atomic_uptr MaxCacheSize;
   const uptr SweepThreshold = /* Sweep when */25/* % of all allocated memory is quarantined. */;
+  const uptr GranuleSize = 32/* Bytes */; 
   // Sweeper thread
   pthread_t SweeperThread;
   volatile bool SweeperThreadLaunched;

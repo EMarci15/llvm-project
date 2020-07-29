@@ -163,6 +163,7 @@ public:
   bool allZero(uptr From, uptr To) {
     dcheck_valid(From);
     dcheck_valid(To);
+    To = roundUpTo(To, BlockSize);
     return BitVector::allZero(index(From), index(To));
   }
 
