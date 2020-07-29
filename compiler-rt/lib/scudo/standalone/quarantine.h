@@ -20,6 +20,20 @@ namespace scudo {
 #define MIN_HEAP_ADDR 0
 #define MAX_HEAP_ADDR (((uptr)1)<<47)
 
+struct AddrLimits {
+  uptr MinAddr, MaxAddr;
+
+  AddrLimits(): MinAddr(MAX_HEAP_ADDR), MaxAddr(MIN_HEAP_ADDR) {}
+  AddrLimits(uptr MinAddr, uptr MaxAddr): MinAddr(MinAddr), MaxAddr(MaxAddr) {}
+  AddrLimits(const AddrLimits& other): MinAddr(other.MinAddr), MaxAddr(other.MaxAddr) {}
+
+  inline void combine(const AddrLimits& other) {
+    if (other.MinAddr < MinAddr) MinAddr = other.MinAddr;
+    if (other.MaxAddr < MaxAddr) MaxAddr = other.MaxAddr;
+  }
+  inline bool contains(const uptr Ptr) const { return ((Ptr >= MinAddr) && (Ptr < MaxAddr)); }
+};
+
 struct QuarantineBatch {
   // With the following count, a batch (and the header that protects it) occupy
   // 4096 bytes on 32-bit platforms, and 8192 bytes on 64-bit.
@@ -61,6 +75,13 @@ struct QuarantineBatch {
     Ptrs[Count] = Ptr;
     Sizes[Count++] = Size;
     this->Size += Size;
+  }
+
+  AddrLimits addrLimits() const {
+    AddrLimits Result;
+    for (uptr I = 0; I < Count; ++I)
+      Result.combine(AddrLimits((uptr)Ptrs[I], ((uptr)Ptrs[I])+Sizes[I]));
+    return Result;
   }
 
   bool canMerge(const QuarantineBatch *const From) const {
@@ -148,6 +169,13 @@ public:
       }
     }
     subFromSize(ExtractedSize);
+  }
+
+  AddrLimits addrLimits() const {
+    AddrLimits Result;
+    for (const QuarantineBatch &Batch : List)
+      Result.combine(Batch.addrLimits());
+    return Result;
   }
 
   void getStats(ScopedString *Str) const {
@@ -323,24 +351,31 @@ private:
     }
   }
 
-  void doSweepAndRecycle() {
-    doSweepAndMark();
-
+  void NOINLINE doSweepAndRecycle() {
     CacheT ToCheck = gatherContents();
-    CacheT FailedFrees = recycleUnmarked(ToCheck);
-    Cache.transfer(&FailedFrees); // Reinsert failed frees
+    
+    AddrLimits PointerLimits = ToCheck.addrLimits();
+    doSweepAndMark(PointerLimits);
 
+    CacheT FailedFrees;
+    FailedFrees.init();
+    
+    recycleUnmarked(FailedFrees, ToCheck);
+    CacheT NewlyQuarantined = gatherContents();
+    recycleUnmarked(FailedFrees, NewlyQuarantined, /*CheckRange=*/true, PointerLimits);
+
+    Cache.transfer(&FailedFrees); // Reinsert failed frees
     ShadowMap.clear();
   }
 
-  inline void doSweepAndMark() {
+  inline void doSweepAndMark(const AddrLimits& Limits) {
     auto MarkingLambda = [&](uptr Ptr, uptr Size) -> void {
       uptr* const Begin = (uptr*) Ptr;
       uptr* const End = (uptr*) (Ptr + Size);
       for (uptr *Word = Begin; Word < End; Word++) {
         uptr Target = *Word;
         // TODO(marton) better quick filtering: only mark if Target is in the plausible range
-        if (Target >= MAX_HEAP_ADDR)
+        if (!Limits.contains(Target))
             continue;
         ShadowMap.set(Target);
       }
@@ -375,10 +410,8 @@ private:
     return Result;
   }
 
-  inline CacheT recycleUnmarked(CacheT &ToCheck) {
-    CacheT FailedFrees;
-    FailedFrees.init();
-
+  inline CacheT recycleUnmarked(CacheT &FailedFrees, CacheT &ToCheck, bool CheckRange = false,
+                                AddrLimits Limits = AddrLimits()) {
     while (QuarantineBatch *B = ToCheck.dequeueBatch()) {
       constexpr uptr NumberOfPrefetch = 8UL;
       CHECK(NumberOfPrefetch <= ARRAY_SIZE(B->Ptrs));
@@ -394,7 +427,14 @@ private:
 
         void *Ptr = B->Ptrs[I];
         uptr Size = B->Sizes[I];
-        if (marked((uptr)Ptr, Size)) {
+        uptr End = ((uptr)Ptr) + Size;
+
+        // If something was inserted during the sweep, and it lies outside of the range
+        // of pointers we considered, then fail to free it, and re-check on the next sweep
+        bool OutOfRange = (CheckRange)
+                              && (((uptr)Ptr < Limits.MinAddr) || (End >= Limits.MaxAddr));
+
+        if ((OutOfRange) || marked((uptr)Ptr, Size)) {
           // Dirty => collect for reinsertion
           FailedFrees.enqueue(Ptr, Size);
         } else {
