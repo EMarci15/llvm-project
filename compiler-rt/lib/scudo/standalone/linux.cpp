@@ -58,6 +58,8 @@ void *map(void *Addr, uptr Size, UNUSED const char *Name, uptr Flags,
     if (Flags & MAP_MEMTAG)
       MmapProt |= PROT_MTE;
 #endif
+    if (Flags & MAP_ONDEMAND)
+      MmapFlags |= MAP_NORESERVE;
   }
   if (Addr) {
     // Currently no scenario for a noaccess mapping with a fixed address.

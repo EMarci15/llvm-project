@@ -28,7 +28,7 @@ public:
     uptr ActualMapSizeBytes = roundUpTo(RequiredMapSizeBytes, 4096);
     
     this->Size = Size;
-    Map = (mapT*)map(NULL, ActualMapSizeBytes, "BitVector", 0);
+    Map = (mapT*)map(NULL, ActualMapSizeBytes, "BitVector", MAP_ONDEMAND);
     MapSize = ActualMapSizeBytes / sizeof(mapT); // Calculate number of entries
   }
 
