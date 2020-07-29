@@ -92,6 +92,7 @@ set(SCUDO_SOURCES
   flags_parser.cpp
   fuchsia.cpp
   linux.cpp
+  proc_maps_parse.cpp
   release.cpp
   report.cpp
   string_utils.cpp
