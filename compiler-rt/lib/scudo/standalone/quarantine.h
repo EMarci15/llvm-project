@@ -12,6 +12,7 @@
 #include "bitvector.h"
 #include "list.h"
 #include "mutex.h"
+#include "secondary.h"
 #include "string_utils.h"
 #include "pthread.h"
 
@@ -34,67 +35,72 @@ struct AddrLimits {
   inline bool contains(const uptr Ptr) const { return ((Ptr >= MinAddr) && (Ptr < MaxAddr)); }
 };
 
-struct QuarantineBatch {
-  // With the following count, a batch (and the header that protects it) occupy
-  // 4096 bytes on 32-bit platforms, and 8192 bytes on 64-bit.
-  static const u32 MaxCount = 509;
+struct SavedSmallAlloc {
+  void *Ptr;
+  uptr Size;
+
+  uptr minAddress() const { return (uptr)Ptr; }
+  uptr maxAddress() const { return (uptr)Ptr+Size; }
+};
+
+template<typename T, u32 MaxCount>
+class QuarantineBatch {
+public:
+  using ThisT = QuarantineBatch<T,MaxCount>;
+  using ItemT = T;
   QuarantineBatch *Next;
   uptr Size;
   u32 Count;
-  void *Ptrs[MaxCount];
-  uptr Sizes[MaxCount];
+  T Items[MaxCount];
 
-  static QuarantineBatch *getNewInstance(void *Ptr, uptr Size) {
-    const static uptr BatchAllocSize = roundUpTo(sizeof(QuarantineBatch), getPageSizeCached());
+  static ThisT *getNewInstance() {
+    const static uptr BatchAllocSize = roundUpTo(sizeof(ThisT), getPageSizeCached());
+    CHECK(BatchAllocSize > 0);
     // TODO(marton) Should we cache these?
-    QuarantineBatch *Instance =
-          (QuarantineBatch*)map(nullptr, BatchAllocSize, "scudo:quarantine");
+    ThisT *Instance =
+          (ThisT*)map(nullptr, BatchAllocSize, "scudo:quarantine");
     DCHECK(Instance);
     
-    Instance->init(Ptr, Size);
+    Instance->init();
     return Instance;
   }
 
   static void deallocate(QuarantineBatch *Instance) {
-    const static uptr BatchAllocSize = roundUpTo(sizeof(QuarantineBatch), getPageSizeCached());
+    const static uptr BatchAllocSize = roundUpTo(sizeof(ThisT), getPageSizeCached());
     unmap((void*)Instance, BatchAllocSize);
   }
 
-  void init(void *Ptr, uptr Size) {
-    Count = 1;
-    Ptrs[0] = Ptr;
-    Sizes[0] = Size;
-    this->Size = Size + sizeof(QuarantineBatch); // Account for the Batch Size.
+  void init() {
+    Count = 0;
+    this->Size = sizeof(QuarantineBatch<T,MaxCount>); // Account for the Batch Size.
   }
 
   // The total size of quarantined nodes recorded in this batch.
   uptr getQuarantinedSize() const { return Size - sizeof(QuarantineBatch); }
 
-  void push_back(void *Ptr, uptr Size) {
+  void push_back(const T& Item, uptr Size) {
     DCHECK_LT(Count, MaxCount);
-    Ptrs[Count] = Ptr;
-    Sizes[Count++] = Size;
+    Items[Count++] = Item;
     this->Size += Size;
   }
 
   AddrLimits addrLimits() const {
     AddrLimits Result;
     for (uptr I = 0; I < Count; ++I)
-      Result.combine(AddrLimits((uptr)Ptrs[I], ((uptr)Ptrs[I])+Sizes[I]));
+      Result.combine(AddrLimits(Items[I].minAddress(), Items[I].maxAddress()));
     return Result;
   }
 
-  bool canMerge(const QuarantineBatch *const From) const {
+  bool canMerge(const QuarantineBatch<T,MaxCount> *const From) const {
     return Count + From->Count <= MaxCount;
   }
 
-  void merge(QuarantineBatch *const From) {
+  void merge(QuarantineBatch<T,MaxCount> *const From) {
     DCHECK_LE(Count + From->Count, MaxCount);
     DCHECK_GE(Size, sizeof(QuarantineBatch));
 
     for (uptr I = 0; I < From->Count; ++I) {
-      Ptrs[Count + I] = From->Ptrs[I];
-      Sizes[Count + I] = From->Sizes[I];
+      Items[Count + I] = From->Items[I];
     }
     Count += From->Count;
     Size += From->getQuarantinedSize();
@@ -104,11 +110,15 @@ struct QuarantineBatch {
   }
 };
 
-static_assert(sizeof(QuarantineBatch) <= (1U << 13), ""); // 8Kb.
+const static u32 SmallBatchCount = 509;
+const static u32 LargeBatchCount = 4064/sizeof(LargeBlock::SavedHeader); 
 
 // Per-thread cache of memory blocks.
-class QuarantineCache {
-public:
+template<typename T, u32 MaxCount>
+struct SpecificQuarantineCache {
+  using BatchT = QuarantineBatch<T, MaxCount>;
+  using ThisT = SpecificQuarantineCache<T, MaxCount>;
+
   void initLinkerInitialized() {}
   void init() {
     memset(this, 0, sizeof(*this));
@@ -118,47 +128,49 @@ public:
   // Total memory used, including internal accounting.
   uptr getSize() const { return atomic_load_relaxed(&Size); }
   // Memory used for internal accounting.
-  uptr getOverheadSize() const { return List.size() * sizeof(QuarantineBatch); }
+  uptr getOverheadSize() const { return List.size() * sizeof(BatchT); }
 
-  void enqueue(void *Ptr, uptr Size) {
-    if (List.empty() || List.back()->Count == QuarantineBatch::MaxCount) {
-      enqueueBatch(QuarantineBatch::getNewInstance(Ptr, Size));
+  void enqueue(const T& Item, uptr Size) {
+    if (List.empty() || List.back()->Count == MaxCount) {
+      BatchT *Batch = BatchT::getNewInstance();
+      Batch->push_back(Item, Size);
+      enqueueBatch(Batch);
     } else {
-      List.back()->push_back(Ptr, Size);
+      List.back()->push_back(Item, Size);
       addToSize(Size);
     }
   }
 
-  void transfer(QuarantineCache *From) {
+  void transfer(SpecificQuarantineCache *From) {
     List.append_back(&From->List);
     addToSize(From->getSize());
     atomic_store_relaxed(&From->Size, 0);
   }
 
-  void enqueueBatch(QuarantineBatch *B) {
+  void enqueueBatch(BatchT *B) {
     List.push_back(B);
     addToSize(B->Size);
   }
 
-  QuarantineBatch *dequeueBatch() {
+  BatchT *dequeueBatch() {
     if (List.empty())
       return nullptr;
-    QuarantineBatch *B = List.front();
+    BatchT *B = List.front();
     List.pop_front();
     subFromSize(B->Size);
     return B;
   }
 
-  void mergeBatches(QuarantineCache *ToDeallocate) {
+  void mergeBatches(ThisT *ToDeallocate) {
     uptr ExtractedSize = 0;
-    QuarantineBatch *Current = List.front();
+    BatchT *Current = List.front();
     while (Current && Current->Next) {
       if (Current->canMerge(Current->Next)) {
-        QuarantineBatch *Extracted = Current->Next;
+        BatchT *Extracted = Current->Next;
         // Move all the chunks into the current batch.
         Current->merge(Extracted);
         DCHECK_EQ(Extracted->Count, 0);
-        DCHECK_EQ(Extracted->Size, sizeof(QuarantineBatch));
+        DCHECK_EQ(Extracted->Size, sizeof(BatchT));
         // Remove the next batch From the list and account for its Size.
         List.extract(Current, Extracted);
         ExtractedSize += Extracted->Size;
@@ -173,7 +185,7 @@ public:
 
   AddrLimits addrLimits() const {
     AddrLimits Result;
-    for (const QuarantineBatch &Batch : List)
+    for (const BatchT &Batch : List)
       Result.combine(Batch.addrLimits());
     return Result;
   }
@@ -183,14 +195,13 @@ public:
     uptr TotalOverheadBytes = 0;
     uptr TotalBytes = 0;
     uptr TotalQuarantineChunks = 0;
-    for (const QuarantineBatch &Batch : List) {
+    for (const BatchT &Batch : List) {
       BatchCount++;
       TotalBytes += Batch.Size;
       TotalOverheadBytes += Batch.Size - Batch.getQuarantinedSize();
       TotalQuarantineChunks += Batch.Count;
     }
-    const uptr QuarantineChunksCapacity =
-        BatchCount * QuarantineBatch::MaxCount;
+    const uptr QuarantineChunksCapacity = BatchCount * MaxCount;
     const uptr ChunksUsagePercent =
         (QuarantineChunksCapacity == 0)
             ? 0
@@ -208,11 +219,77 @@ public:
   }
 
 private:
-  SinglyLinkedList<QuarantineBatch> List;
+  SinglyLinkedList<BatchT> List;
   atomic_uptr Size;
 
   void addToSize(uptr add) { atomic_store_relaxed(&Size, getSize() + add); }
   void subFromSize(uptr sub) { atomic_store_relaxed(&Size, getSize() - sub); }
+};
+
+struct QuarantineCache {
+  using SmallCacheT = SpecificQuarantineCache<SavedSmallAlloc, SmallBatchCount>;
+  using LargeCacheT = SpecificQuarantineCache<LargeBlock::SavedHeader, LargeBatchCount>;
+
+  SmallCacheT SmallCache;
+  LargeCacheT LargeCache;
+  using SmallBatchT = SmallCacheT::BatchT;
+  using LargeBatchT = LargeCacheT::BatchT;
+
+  void initLinkerInitialized() {}
+  void init() {
+    SmallCache.init();
+    LargeCache.init();
+    initLinkerInitialized();
+  }
+
+  // Total memory used, including internal accounting.
+  uptr getSize() const { return SmallCache.getSize() + LargeCache.getSize(); }
+  // Memory used for internal accounting.
+  uptr getOverheadSize() const
+    { return SmallCache.getOverheadSize() + LargeCache.getOverheadSize();}
+
+  inline void enqueueSmall(const SavedSmallAlloc& Item) {
+    SmallCache.enqueue(Item, Item.Size);
+  }
+  inline void enqueueLarge(const LargeBlock::SavedHeader& Item) {
+    LargeCache.enqueue(Item, Item.BlockEnd - Item.Block);
+  }
+
+  void transfer(QuarantineCache *From) {
+    SmallCache.transfer(&From->SmallCache);
+    LargeCache.transfer(&From->LargeCache);
+  }
+
+  inline void enqueueBatch(SmallBatchT *B) {
+    SmallCache.enqueueBatch(B);
+  }
+  inline void enqueueBatch(LargeBatchT *B) {
+    LargeCache.enqueueBatch(B);
+  }
+
+  inline SmallBatchT *dequeueSmallBatch() {
+    return SmallCache.dequeueBatch();
+  }
+  inline LargeBatchT *dequeueLargeBatch() {
+    return LargeCache.dequeueBatch();
+  }
+
+  void mergeBatches(QuarantineCache *ToDeallocate) {
+    SmallCache.mergeBatches(&ToDeallocate->SmallCache);
+    LargeCache.mergeBatches(&ToDeallocate->LargeCache);
+  }
+
+  AddrLimits addrLimits() const {
+    AddrLimits Result = SmallCache.addrLimits();
+    Result.combine(LargeCache.addrLimits());
+    
+    return Result;
+  }
+
+  void getStats(ScopedString *Str) const {
+    SmallCache.getStats(Str);
+    LargeCache.getStats(Str);
+  }
 };
 
 template<typename QuarantineT>
@@ -252,8 +329,13 @@ public:
   }
   uptr getCacheSize() const { return atomic_load_relaxed(&MaxCacheSize); }
 
-  void put(CacheT *C, Node *Ptr, uptr Size) {
-    C->enqueue(Ptr, Size);
+  void put(CacheT *C, const SavedSmallAlloc& Alloc) {
+    C->enqueueSmall(Alloc);
+    if (C->getSize() > getCacheSize())
+      drain(C);
+  }
+  void put(CacheT *C, const LargeBlock::SavedHeader& Header) {
+    C->enqueueLarge(Header);
     if (C->getSize() > getCacheSize())
       drain(C);
   }
@@ -375,7 +457,7 @@ private:
       uptr* const End = (uptr*) (Ptr + Size);
       for (uptr *Word = Begin; Word < End; Word++) {
         uptr Target = *Word;
-        // TODO(marton) better quick filtering: only mark if Target is in the plausible range
+        // Only mark if Target is in the plausible range
         if (!Limits.contains(Target))
             continue;
         ShadowMap.set(Target);
@@ -411,42 +493,54 @@ private:
     return Result;
   }
 
-  inline CacheT recycleUnmarked(CacheT &FailedFrees, CacheT &ToCheck, bool CheckRange = false,
-                                AddrLimits Limits = AddrLimits()) {
-    while (QuarantineBatch *B = ToCheck.dequeueBatch()) {
+  template<class SpecificCacheT, typename SF, typename FF>
+  void checkUnmarked(SpecificCacheT &ToCheck, SF SuccessCb, FF FailureCb,
+                     bool CheckRange, AddrLimits Limits) {
+    while (typename SpecificCacheT::BatchT *B = ToCheck.dequeueBatch()) {
       constexpr uptr NumberOfPrefetch = 8UL;
-      CHECK(NumberOfPrefetch <= ARRAY_SIZE(B->Ptrs));
-      for (uptr I = 0; I < NumberOfPrefetch; I++) {
-        PREFETCH(B->Ptrs[I]);
-        PREFETCH(B->Sizes[I]);
-      }
+      CHECK(NumberOfPrefetch <= ARRAY_SIZE(B->Items));
+      for (uptr I = 0; I < NumberOfPrefetch; I++) PREFETCH(&B->Items[I]);
       for (uptr I = 0, Count = B->Count; I < Count; I++) {
-        if (I + NumberOfPrefetch < Count) {
-          PREFETCH(B->Ptrs[I + NumberOfPrefetch]);
-          PREFETCH(B->Sizes[I + NumberOfPrefetch]);
-        }
+        if (I + NumberOfPrefetch < Count) PREFETCH(&B->Items[I + NumberOfPrefetch]);
 
-        void *Ptr = B->Ptrs[I];
-        uptr Size = B->Sizes[I];
-        uptr End = ((uptr)Ptr) + Size;
+        auto& Item = B->Items[I];
+        uptr Start = Item.minAddress();
+        uptr End = Item.maxAddress();
+        uptr Size = End - Start;
+        CHECK(Start);
 
         // If something was inserted during the sweep, and it lies outside of the range
         // of pointers we considered, then fail to free it, and re-check on the next sweep
-        bool OutOfRange = (CheckRange)
-                              && (((uptr)Ptr < Limits.MinAddr) || (End >= Limits.MaxAddr));
+        bool OutOfRange = CheckRange
+                              && ((Item.minAddress() < Limits.MinAddr)
+                                    || (Item.maxAddress() > Limits.MaxAddr));
 
-        if ((OutOfRange) || marked((uptr)Ptr, Size)) {
-          // Dirty => collect for reinsertion
-          FailedFrees.enqueue(Ptr, Size);
+        if (OutOfRange || marked(Start, Size)) {
+          FailureCb(Item);
         } else {
-          // Clean => recycle
-          Allocator->recycleChunk(reinterpret_cast<Node *>(B->Ptrs[I]));
+          SuccessCb(Item);
         }
       }
-      QuarantineBatch::deallocate(B);
+      SpecificCacheT::BatchT::deallocate(B);
     }
+  }
 
-    return FailedFrees;
+  inline void recycleUnmarked(CacheT &FailedFrees, CacheT &ToCheck, bool CheckRange = false,
+                                AddrLimits Limits = AddrLimits()) {
+    auto SmallFailureCb =
+      [&FailedFrees](const SavedSmallAlloc& Item) -> void { FailedFrees.enqueueSmall(Item); };
+    auto SmallSuccessCb = [this](const SavedSmallAlloc& Item) -> void {
+      Allocator->recycleChunk(reinterpret_cast<Node*>(Item.Ptr));
+    };
+    auto LargeFailureCb = [&FailedFrees](const LargeBlock::SavedHeader& Item) -> void {
+      FailedFrees.enqueueLarge(Item);
+    };
+    auto LargeSuccessCb = [this](const LargeBlock::SavedHeader& Item) -> void {
+      Allocator->recycleChunk(Item);
+    };
+    
+    checkUnmarked(ToCheck.SmallCache, SmallSuccessCb, SmallFailureCb, CheckRange, Limits);
+    checkUnmarked(ToCheck.LargeCache, LargeSuccessCb, LargeFailureCb, CheckRange, Limits);
   }
 
   inline bool marked(uptr Ptr, uptr Size) {

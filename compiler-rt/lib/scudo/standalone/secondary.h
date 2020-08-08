@@ -46,6 +46,17 @@ static Header *getHeader(const void *Ptr) {
   return getHeader(reinterpret_cast<uptr>(Ptr));
 }
 
+struct SavedHeader {
+  uptr Block;
+  uptr BlockEnd;
+  uptr MapBase;
+  uptr MapSize;
+  MapPlatformData Data;
+
+  uptr minAddress() const { return Block; }
+  uptr maxAddress() const { return BlockEnd; }
+};
+
 } // namespace LargeBlock
 
 class MapAllocatorNoCache {
@@ -81,39 +92,30 @@ public:
     initLinkerInitialized(ReleaseToOsInterval);
   }
 
+  bool store(const LargeBlock::SavedHeader& H) {
+    CachedBlock Entry;
+    Entry.Block = H.Block;
+    Entry.BlockEnd = H.BlockEnd;
+    Entry.MapBase = H.MapBase;
+    Entry.MapSize = H.MapSize;
+    Entry.Data = H.Data;
+    Entry.Time = 0; // Already released
+
+    return store(Entry);
+  }
+
   bool store(LargeBlock::Header *H) {
-    bool EntryCached = false;
-    bool EmptyCache = false;
     const u64 Time = getMonotonicTime();
-    {
-      ScopedLock L(Mutex);
-      if (EntriesCount == MaxEntriesCount) {
-        if (IsFullEvents++ == 4U)
-          EmptyCache = true;
-      } else {
-        for (uptr I = 0; I < MaxEntriesCount; I++) {
-          if (Entries[I].Block)
-            continue;
-          if (I != 0)
-            Entries[I] = Entries[0];
-          Entries[0].Block = reinterpret_cast<uptr>(H);
-          Entries[0].BlockEnd = H->BlockEnd;
-          Entries[0].MapBase = H->MapBase;
-          Entries[0].MapSize = H->MapSize;
-          Entries[0].Data = H->Data;
-          Entries[0].Time = Time;
-          EntriesCount++;
-          EntryCached = true;
-          break;
-        }
-      }
-    }
-    s32 Interval;
-    if (EmptyCache)
-      empty();
-    else if ((Interval = getReleaseToOsIntervalMs()) >= 0)
-      releaseOlderThan(Time - static_cast<u64>(Interval) * 1000000);
-    return EntryCached;
+
+    CachedBlock Entry;
+    Entry.Block = reinterpret_cast<uptr>(H);
+    Entry.BlockEnd = H->BlockEnd;
+    Entry.MapBase = H->MapBase;
+    Entry.MapSize = H->MapSize;
+    Entry.Data = H->Data;
+    Entry.Time = Time;
+
+    return store(Entry);
   }
 
   bool retrieve(uptr Size, LargeBlock::Header **H) {
@@ -213,6 +215,36 @@ private:
     MapPlatformData Data;
     u64 Time;
   };
+  
+  inline bool store(const CachedBlock& Entry) {
+    const u64 Time = getMonotonicTime();
+    bool EntryCached = false;
+    bool EmptyCache = false;
+    {
+      ScopedLock L(Mutex);
+      if (EntriesCount == MaxEntriesCount) {
+        if (IsFullEvents++ == 4U)
+          EmptyCache = true;
+      } else {
+        for (uptr I = 0; I < MaxEntriesCount; I++) {
+          if (Entries[I].Block)
+            continue;
+          if (I != 0)
+            Entries[I] = Entries[0];
+          Entries[0] = Entry;
+          EntriesCount++;
+          EntryCached = true;
+          break;
+        }
+      }
+    }
+    s32 Interval;
+    if (EmptyCache)
+      empty();
+    else if ((Interval = getReleaseToOsIntervalMs()) >= 0)
+      releaseOlderThan(Time - static_cast<u64>(Interval) * 1000000);
+    return EntryCached;
+  }
 
   HybridMutex Mutex;
   CachedBlock Entries[MaxEntriesCount];
@@ -238,7 +270,9 @@ public:
   void *allocate(uptr Size, uptr AlignmentHint = 0, uptr *BlockEnd = nullptr,
                  FillContentsMode FillContents = NoFill);
 
+  void recycle(const LargeBlock::SavedHeader& Header);
   void deallocate(void *Ptr);
+  LargeBlock::SavedHeader decommit(void *Ptr);
 
   static uptr getBlockEnd(void *Ptr) {
     return LargeBlock::getHeader(Ptr)->BlockEnd;
@@ -408,6 +442,45 @@ template <class CacheT> void MapAllocator<CacheT>::deallocate(void *Ptr) {
   const uptr Size = H->MapSize;
   MapPlatformData Data = H->Data;
   unmap(Addr, Size, UNMAP_ALL, &Data);
+}
+
+template <class CacheT> void MapAllocator<CacheT>::recycle(const LargeBlock::SavedHeader& Header) {
+  {
+    ScopedLock L(Mutex);
+    Stats.sub(StatMapped, Header.MapSize);
+  }
+  if (CacheT::canCache(Header.BlockEnd - Header.Block)) {
+    if (Cache.store(Header))
+      return;
+  }
+  void *Addr = reinterpret_cast<void *>(Header.MapBase);
+  const uptr Size = Header.MapSize;
+  MapPlatformData Data = Header.Data;
+  unmap(Addr, Size, UNMAP_ALL, &Data);
+}
+
+template <class CacheT> LargeBlock::SavedHeader MapAllocator<CacheT>::decommit(void *Ptr) {
+  LargeBlock::Header *H = LargeBlock::getHeader(Ptr);
+  const uptr Block = reinterpret_cast<uptr>(H);
+  const uptr CommitSize = H->BlockEnd - Block;
+  {
+    ScopedLock L(Mutex);
+    InUseBlocks.remove(H);
+    FreedBytes += CommitSize;
+    NumberOfFrees++;
+    Stats.sub(StatAllocated, CommitSize);
+  }
+
+  LargeBlock::SavedHeader Save;
+  Save.Block = Block;
+  Save.BlockEnd = H->BlockEnd;
+  Save.MapBase = H->MapBase;
+  Save.MapSize = H->MapSize;
+  Save.Data = H->Data;
+
+  MapPlatformData Data = H->Data;
+  releasePagesToOS(Block, 0, Save.BlockEnd - Block, &Data);
+  return Save;
 }
 
 template <class CacheT>

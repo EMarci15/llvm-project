@@ -527,6 +527,9 @@ public:
     } else
       Secondary.deallocate(BlockBegin);
   }
+  void recycleChunk(const LargeBlock::SavedHeader& Header) {
+    Secondary.recycle(Header);
+  }
 
   // TODO(kostyak): disable() is currently best-effort. There are some small
   //                windows of time when an allocation could still succeed after
@@ -993,9 +996,20 @@ private:
     } else {
       NewHeader.State = Chunk::State::Quarantined;
       Chunk::compareExchangeHeader(Cookie, Ptr, &NewHeader, Header);
+      void *BlockBegin = getBlockBegin(Ptr, &NewHeader);
+      const uptr ClassId = NewHeader.ClassId;
       bool UnlockRequired;
       auto *TSD = TSDRegistry.getTSDAndLock(&UnlockRequired);
-      Quarantine.put(&TSD->QuarantineCache, Ptr, Size);
+      if (LIKELY(ClassId)) {
+        SavedSmallAlloc Alloc;
+        Alloc.Ptr = Ptr;
+        Alloc.Size = Size;
+        
+        Quarantine.put(&TSD->QuarantineCache, Alloc);
+      } else {
+        LargeBlock::SavedHeader SavedHeader = Secondary.decommit(BlockBegin);
+        Quarantine.put(&TSD->QuarantineCache, SavedHeader);
+      }
       if (UnlockRequired)
         TSD->unlock();
     }
