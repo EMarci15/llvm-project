@@ -30,7 +30,7 @@ struct AddrLimits {
 
   inline void combine(const AddrLimits& other) {
     if (other.MinAddr < MinAddr) MinAddr = other.MinAddr;
-    if (other.MaxAddr < MaxAddr) MaxAddr = other.MaxAddr;
+    if (other.MaxAddr > MaxAddr) MaxAddr = other.MaxAddr;
   }
   inline bool contains(const uptr Ptr) const { return ((Ptr >= MinAddr) && (Ptr < MaxAddr)); }
 };
@@ -161,7 +161,7 @@ struct SpecificQuarantineCache {
     return B;
   }
 
-  void mergeBatches(ThisT *ToDeallocate) {
+  void mergeBatches() {
     uptr ExtractedSize = 0;
     BatchT *Current = List.front();
     while (Current && Current->Next) {
@@ -174,8 +174,8 @@ struct SpecificQuarantineCache {
         // Remove the next batch From the list and account for its Size.
         List.extract(Current, Extracted);
         ExtractedSize += Extracted->Size;
-        // Add it to deallocation list.
-        ToDeallocate->enqueueBatch(Extracted);
+        // Deallocate.
+        BatchT::deallocate(Extracted);
       } else {
         Current = Current->Next;
       }
@@ -274,9 +274,9 @@ struct QuarantineCache {
     return LargeCache.dequeueBatch();
   }
 
-  void mergeBatches(QuarantineCache *ToDeallocate) {
-    SmallCache.mergeBatches(&ToDeallocate->SmallCache);
-    LargeCache.mergeBatches(&ToDeallocate->LargeCache);
+  void mergeBatches() {
+    SmallCache.mergeBatches();
+    LargeCache.mergeBatches();
   }
 
   AddrLimits addrLimits() const {
@@ -483,7 +483,7 @@ private:
       constexpr uptr OverheadThresholdPercents = 100;
       if (OverheadSize * (100 + OverheadThresholdPercents) >
               CacheSize * OverheadThresholdPercents) {
-        Cache.mergeBatches(&Result);
+        Cache.mergeBatches();
       }
 
       // Remove batches from cache
