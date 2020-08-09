@@ -187,6 +187,7 @@ public:
     }
 #endif // GWP_ASAN_HOOKS
 
+    // TODO(marton) Can we skip this if already done when quarantining
     FillContentsMode FillContents =
         ZeroContents ? ZeroFill : Options.FillContents;
 
@@ -1004,7 +1005,12 @@ private:
         SavedSmallAlloc Alloc;
         Alloc.Ptr = Ptr;
         Alloc.Size = Size;
-        
+
+        // Wipe contents
+        FillContentsMode FillContents =
+          (Options.FillContents == NoFill) ? ZeroFill : Options.FillContents;
+        memset(Ptr, FillContents == ZeroFill ? 0 : PatternFillByte, Size);
+
         Quarantine.put(&TSD->QuarantineCache, Alloc);
       } else {
         LargeBlock::SavedHeader SavedHeader = Secondary.decommit(BlockBegin);
