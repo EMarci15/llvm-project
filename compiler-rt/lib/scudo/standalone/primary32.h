@@ -468,7 +468,7 @@ private:
         const uptr Size = (Region == Sci->CurrentRegion)
                               ? Sci->CurrentRegionAllocated
                               : MaxSize;
-        ReleaseRecorder Recorder(Region);
+        ReleaseRecorder Recorder(Region, NULL);
         releaseFreeMemoryToOS(Sci->FreeList, Region, Size, BlockSize,
                               &Recorder);
         if (Recorder.getReleasedRangesCount() > 0) {

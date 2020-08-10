@@ -64,6 +64,7 @@ set(SCUDO_HEADERS
   memory_range_registry.h
   mutex.h
   platform.h
+  pool.h
   primary32.h
   primary64.h
   proc_maps_parse.h

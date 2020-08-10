@@ -73,6 +73,7 @@ endmacro()
 
 set(SCUDO_UNIT_TEST_SOURCES
   atomic_test.cpp
+  bitvector_test.cpp
   bytemap_test.cpp
   checksum_test.cpp
   chunk_test.cpp

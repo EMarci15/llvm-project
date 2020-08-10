@@ -32,7 +32,8 @@ public:
     ReleasedRangesCount++;
     ReleasedBytes += Size;
     // TODO(marton) Is this range guaranteed to be fully committed?
-    ActivePages->clear(BaseAddress+From, BaseAddress+To);
+    if (ActivePages)
+      ActivePages->clear(BaseAddress+From, BaseAddress+To);
   }
 
 private:

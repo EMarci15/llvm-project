@@ -67,6 +67,7 @@ public:
     return false;
   }
   bool store(UNUSED LargeBlock::Header *H) { return false; }
+  bool store(const LargeBlock::SavedHeader& H) { return false; }
   static bool canCache(UNUSED uptr Size) { return false; }
   void disable() {}
   void enable() {}

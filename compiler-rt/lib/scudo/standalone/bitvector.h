@@ -17,6 +17,12 @@ namespace scudo {
 
 // Flat array of bits backed by pages on-demand.
 class BitVector {
+private:
+  inline uptr ActualMapSizeBytes() {
+    uptr RequiredMapSizeBytes = divRoundUp(Size,BITS_PER_ENTRY) * sizeof(mapT);
+    return roundUpTo(RequiredMapSizeBytes, 4096);
+  }
+
 public:
   using mapT = atomic_u64;
   using mapValT = mapT::Type;
@@ -24,12 +30,10 @@ public:
   const uptr ENTRIES_PER_PAGE = getPageSizeSlow()/sizeof(mapT);
 
   void mapArray(uptr Size) {
-    uptr RequiredMapSizeBytes = divRoundUp(Size,BITS_PER_ENTRY) * sizeof(mapT);
-    uptr ActualMapSizeBytes = roundUpTo(RequiredMapSizeBytes, 4096);
-    
     this->Size = Size;
-    Map = (mapT*)map(NULL, ActualMapSizeBytes, "BitVector", MAP_ONDEMAND);
-    MapSize = ActualMapSizeBytes / sizeof(mapT); // Calculate number of entries
+
+    Map = (mapT*)map(NULL, ActualMapSizeBytes(), "BitVector", MAP_ONDEMAND);
+    MapSize = ActualMapSizeBytes() / sizeof(mapT); // Calculate number of entries
   }
 
   void init(uptr Size) { mapArray(Size); }
@@ -117,7 +121,7 @@ public:
 
 private:
   uptr Size, MapSize;
-  mapT *Map;
+  mapT *Map = nullptr;
 
   inline uptr arrIndex(uptr Index) { return Index / BITS_PER_ENTRY; }
   inline uptr subIndex(uptr Index) { return Index % BITS_PER_ENTRY; }
@@ -164,7 +168,7 @@ public:
     dcheck_valid(From);
     dcheck_valid(To);
     To = roundUpTo(To, BlockSize);
-    return BitVector::allZero(index(From), index(To));
+    return BitVector::allZero(index(From), index(To)-1);
   }
 
   void disable() {}

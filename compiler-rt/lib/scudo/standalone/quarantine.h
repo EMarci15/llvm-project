@@ -14,6 +14,7 @@
 #include "mutex.h"
 #include "secondary.h"
 #include "string_utils.h"
+#include "pool.h"
 #include "pthread.h"
 
 namespace scudo {
@@ -52,22 +53,21 @@ public:
   uptr Size;
   u32 Count;
   T Items[MaxCount];
+  static PoolAllocator<ThisT>* Pool() {
+    static PoolAllocator<ThisT> P;
+    return &P;
+  }
 
   static ThisT *getNewInstance() {
-    const static uptr BatchAllocSize = roundUpTo(sizeof(ThisT), getPageSizeCached());
-    CHECK(BatchAllocSize > 0);
-    // TODO(marton) Should we cache these?
-    ThisT *Instance =
-          (ThisT*)map(nullptr, BatchAllocSize, "scudo:quarantine");
+    ThisT *Instance = Pool()->alloc();
     DCHECK(Instance);
     
     Instance->init();
     return Instance;
   }
 
-  static void deallocate(QuarantineBatch *Instance) {
-    const static uptr BatchAllocSize = roundUpTo(sizeof(ThisT), getPageSizeCached());
-    unmap((void*)Instance, BatchAllocSize);
+  static void deallocate(ThisT *Instance) {
+    Pool()->dealloc(Instance);
   }
 
   void init() {
@@ -109,6 +109,10 @@ public:
     From->Size = sizeof(QuarantineBatch);
   }
 };
+  
+template<typename T, u32 M>
+typename QuarantineBatch<T,M>::template PoolAllocator<QuarantineBatch<T,M>> Pool;
+
 
 const static u32 SmallBatchCount = 509;
 const static u32 LargeBatchCount = 4064/sizeof(LargeBlock::SavedHeader); 
@@ -393,7 +397,7 @@ public:
       if (ShutdownNeeded)
         return; // Kill thread
 
-      DCHECK(SweepNeeded)
+      DCHECK(SweepNeeded);
       doSweepAndRecycle();
     }
   }
