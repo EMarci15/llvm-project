@@ -53,6 +53,7 @@ public:
   uptr Size;
   u32 Count;
   T Items[MaxCount];
+
   static PoolAllocator<ThisT>* Pool() {
     static PoolAllocator<ThisT> P;
     return &P;
@@ -271,13 +272,6 @@ struct QuarantineCache {
     LargeCache.enqueueBatch(B);
   }
 
-  inline SmallBatchT *dequeueSmallBatch() {
-    return SmallCache.dequeueBatch();
-  }
-  inline LargeBatchT *dequeueLargeBatch() {
-    return LargeCache.dequeueBatch();
-  }
-
   void mergeBatches() {
     SmallCache.mergeBatches();
     LargeCache.mergeBatches();
@@ -410,7 +404,7 @@ private:
   atomic_uptr MaxSize;
   alignas(SCUDO_CACHE_LINE_SIZE) atomic_uptr MaxCacheSize;
   const uptr SweepThreshold = /* Sweep when */25/* % of all allocated memory is quarantined. */;
-  const uptr GranuleSize = 32/* Bytes */; 
+  const uptr GranuleSize = 16/* Bytes */; 
   // Sweeper thread
   pthread_t SweeperThread;
   volatile bool SweeperThreadLaunched;
@@ -453,6 +447,10 @@ private:
 
     Cache.transfer(&FailedFrees); // Reinsert failed frees
     ShadowMap.clear();
+
+    DCHECK(ToCheck.empty());
+    DCHECK(NewlyQuarantined.empty());
+    DCHECK(FailedFrees.empty());
   }
 
   inline void doSweepAndMark(const AddrLimits& Limits) {

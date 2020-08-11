@@ -33,7 +33,6 @@ public:
     this->Size = Size;
 
     Map = (mapT*)map(NULL, ActualMapSizeBytes(), "BitVector", MAP_ONDEMAND);
-    MapSize = ActualMapSizeBytes() / sizeof(mapT); // Calculate number of entries
   }
 
   void init(uptr Size) { mapArray(Size); }
@@ -49,42 +48,20 @@ public:
   }
 
   void clear() {
-    releasePagesToOS((uptr)Map, 0, MapSize);
+    releasePagesToOS((uptr)Map, 0, ActualMapSizeBytes());
   }
 
   void clear(uptr From, uptr To) {
-    const mapValT startMask = ~(subMask(From)-1); // 1s at & above subIndex(From)
-    const mapValT endMask = ((subMask(To)<<1)-1); // 1s at & below subIndex(To)
-
     const uptr startIndex = arrIndex(From);
-    const uptr endIndex = arrIndex(To);
+    const uptr endIndex = arrIndex(To) + (subIndex(To) > 0);
 
-    if (startIndex == endIndex) {
-      mapValT mask = startMask & endMask; // single entry -- 1s from From to To
-      atomic_and_fetch(&Map[startIndex], ~mask);
-      return;
-    } else {
-      // Zero start and end
-      atomic_and_fetch(&Map[startIndex], ~startMask);
-      atomic_and_fetch(&Map[endIndex], ~endMask);
+    const uptr startPage = roundDownTo(startIndex, ENTRIES_PER_PAGE);
+    const uptr endPage = roundUpTo(endIndex, ENTRIES_PER_PAGE);
 
-      // Zero partial pages at start and end
-      const uptr firstFullPage = roundUpTo(startIndex+1, ENTRIES_PER_PAGE);
-      const uptr lastFullPage = roundDownTo(endIndex, ENTRIES_PER_PAGE);
-      for (uptr index = startIndex+1; (index < firstFullPage) && (index < endIndex); index++) {
-        atomic_store_relaxed(&Map[index], 0);
-      }
-      if (firstFullPage <= lastFullPage) {
-        for (uptr index = lastFullPage; index < endIndex; index++) {
-          atomic_store_relaxed(&Map[index], 0);
-        }
-      }
-
-      // Unmap full pages in the middle
-      uptr releaseStart = (uptr)&Map[firstFullPage];
-      uptr releaseSize = lastFullPage - firstFullPage;
-      releasePagesToOS(releaseStart, 0, releaseSize * sizeof(mapT));
-    }
+    // Unmap full pages in the middle
+    uptr releaseStart = (uptr)&Map[startPage];
+    uptr releaseSize = endPage - startPage;
+    releasePagesToOS(releaseStart, 0, releaseSize * sizeof(mapT));
   }
 
   bool operator[](uptr Index) {
@@ -120,8 +97,8 @@ public:
   void enable() {}
 
 private:
-  uptr Size, MapSize;
-  mapT *Map = nullptr;
+  uptr Size;
+  mapT *Map;
 
   inline uptr arrIndex(uptr Index) { return Index / BITS_PER_ENTRY; }
   inline uptr subIndex(uptr Index) { return Index % BITS_PER_ENTRY; }

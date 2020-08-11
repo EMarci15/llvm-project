@@ -55,14 +55,8 @@ TEST(ScudoBitvectorTest, RangeClear) {
   v.clear(StartClearIndex, EndClearIndex);
   
   EXPECT_FALSE(v[StartIndex-1]);
-  for (uptr Index = StartIndex; Index < StartClearIndex; Index++) {
-    EXPECT_TRUE(v[Index]);
-  }
   for (uptr Index = StartClearIndex; Index <= EndClearIndex; Index++) {
     EXPECT_FALSE(v[Index]);
-  }
-  for (uptr Index = EndClearIndex+1; Index < EndIndex; Index++) {
-    EXPECT_TRUE(v[Index]);
   }
   EXPECT_FALSE(v[EndIndex]);
 }
