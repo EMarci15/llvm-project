@@ -637,9 +637,7 @@ public:
     };
 
     Primary.iterateOverActivePages(PrimaryLambda);
-    Secondary.disable();
     Secondary.iterateOverBlocks(SecondaryLambda);
-    Secondary.enable();
     MemRangeRegistry.iterateRanges(Callback);
   }
 

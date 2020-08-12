@@ -286,6 +286,7 @@ public:
   void getStats(ScopedString *Str) const;
 
   void disable() {
+    IterMutex.lock();
     Mutex.lock();
     Cache.disable();
   }
@@ -293,11 +294,26 @@ public:
   void enable() {
     Cache.enable();
     Mutex.unlock();
+    IterMutex.unlock();
   }
 
-  template <typename F> void iterateOverBlocks(F Callback) const {
-    for (const auto &H : InUseBlocks)
-      Callback(reinterpret_cast<uptr>(&H) + LargeBlock::getHeaderSize());
+  template <typename F> void iterateOverBlocks(F Callback) {
+    ScopedLock L(IterMutex);
+    LargeBlock::Header *H;
+    {
+      ScopedLock L(Mutex);
+      H = InUseBlocks.front();
+      IterBlock = H;
+    }
+    while (H) {
+      Callback(reinterpret_cast<uptr>(H) + LargeBlock::getHeaderSize());
+
+      {
+        ScopedLock L(Mutex);
+        H = H->Next;
+        IterBlock = H;
+      }
+    }
   }
 
   static uptr canCache(uptr Size) { return CacheT::canCache(Size); }
@@ -321,6 +337,13 @@ private:
   u32 NumberOfAllocs;
   u32 NumberOfFrees;
   LocalStats Stats;
+
+  HybridMutex IterMutex;
+  LargeBlock::Header* IterBlock;
+
+  // Lock Mutex, and ensure that the scan (iterateOverBlocks()) is not currently in H.
+  // If so, we cannot remove H now, as that would disrupt the scan.
+  void lockOn(LargeBlock::Header* H);
 };
 
 // As with the Primary, the size passed to this function includes any desired
@@ -429,14 +452,17 @@ template <class CacheT> void MapAllocator<CacheT>::deallocate(void *Ptr) {
   LargeBlock::Header *H = LargeBlock::getHeader(Ptr);
   const uptr Block = reinterpret_cast<uptr>(H);
   const uptr CommitSize = H->BlockEnd - Block;
-  {
-    ScopedLock L(Mutex);
-    InUseBlocks.remove(H);
-    FreedBytes += CommitSize;
-    NumberOfFrees++;
-    Stats.sub(StatAllocated, CommitSize);
-    Stats.sub(StatMapped, H->MapSize);
-  }
+
+  lockOn(H);
+
+  InUseBlocks.remove(H);
+  FreedBytes += CommitSize;
+  NumberOfFrees++;
+  Stats.sub(StatAllocated, CommitSize);
+  Stats.sub(StatMapped, H->MapSize);
+
+  Mutex.unlock();
+
   if (CacheT::canCache(CommitSize) && Cache.store(H))
     return;
   void *Addr = reinterpret_cast<void *>(H->MapBase);
@@ -482,6 +508,34 @@ template <class CacheT> LargeBlock::SavedHeader MapAllocator<CacheT>::decommit(v
   MapPlatformData Data = H->Data;
   releasePagesToOS(Block, 0, Save.BlockEnd - Block, &Data);
   return Save;
+}
+
+template <class CacheT>
+void MapAllocator<CacheT>::lockOn(LargeBlock::Header* H) {
+  const u8 NumTries = 3U;
+  const u8 NumSpinTries = 8U;
+  const u8 NumYields = 8U;
+
+  for (u8 Tries = 0; Tries < NumTries; Tries++) {
+    for (u8 t = 0; t < NumSpinTries; t++) {
+      if (IterBlock != H) break;
+      yieldProcessor(NumYields);
+    }
+
+    Mutex.lock();
+    if (IterBlock != H) return; // Locked and checked
+
+    // Failure, we must unlock and wait
+    Mutex.unlock();
+    yieldProcessor(NumYields);
+  }
+
+  // Failed to quickly lock, wait for iteration to finish with secondary and lock
+  {
+    ScopedLock L(IterMutex);
+    Mutex.lock();
+    DCHECK(IterBlock == NULL);
+  }
 }
 
 template <class CacheT>
