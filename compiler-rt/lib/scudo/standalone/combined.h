@@ -505,6 +505,7 @@ public:
 
   // Chunk recycling function, returns a quarantined chunk to the backend,
   // first making sure it hasn't been tampered with.
+  // Only called for primary, as secondary chunks are already decommitted.
   void recycleChunk(void *Ptr) {
     initThreadMaybe(/*MinimalInit=*/true);
 
@@ -519,15 +520,15 @@ public:
 
     void *BlockBegin = getBlockBegin(Ptr, &NewHeader);
     const uptr ClassId = NewHeader.ClassId;
-    if (LIKELY(ClassId)) {
-        bool UnlockRequired;
-        auto *TSD = TSDRegistry.getTSDAndLock(&UnlockRequired);
-        TSD->Cache.deallocate(ClassId, BlockBegin);
-        if (UnlockRequired)
-          TSD->unlock();
-    } else
-      Secondary.deallocate(BlockBegin);
+    DCHECK(ClassId);
+
+    bool UnlockRequired;
+    auto *TSD = TSDRegistry.getTSDAndLock(&UnlockRequired);
+    TSD->Cache.deallocate(ClassId, BlockBegin);
+    if (UnlockRequired)
+      TSD->unlock();
   }
+  // Only called for released secondary chunks.
   void recycleChunk(const LargeBlock::SavedHeader& Header) {
     Secondary.recycle(Header);
   }

@@ -122,11 +122,11 @@ private:
   uptr Size;
   mapT *Map;
 
-  inline uptr arrIndex(uptr Index) { return Index / BITS_PER_ENTRY; }
-  inline uptr subIndex(uptr Index) { return Index % BITS_PER_ENTRY; }
+  inline uptr arrIndex(uptr Index) const { return Index / BITS_PER_ENTRY; }
+  inline uptr subIndex(uptr Index) const { return Index % BITS_PER_ENTRY; }
 
-  inline mapT* arrayEntry(uptr Index) { return &Map[arrIndex(Index)]; }
-  inline mapValT subMask(uptr Index) { return ((mapValT)1) << subIndex(Index); }
+  inline mapT* arrayEntry(uptr Index) const { return &Map[arrIndex(Index)]; }
+  inline mapValT subMask(uptr Index) const { return ((mapValT)1) << subIndex(Index); }
 };
 
 // A class recording a boolean for each block of memory (of size BlockSize),

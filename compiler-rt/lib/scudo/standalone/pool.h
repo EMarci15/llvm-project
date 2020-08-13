@@ -22,21 +22,24 @@ template<typename T>
 class PoolAllocator {
   struct FreeItem { FreeItem* Next; };
 
-  uptr ElementAllocSize, TotalAllocSize;
+  uptr ElementAllocSize, AllocCount;
 
   void expand() {
-    uptr Addr = (uptr)map(NULL, TotalAllocSize, "scudo:pool");
-    for (uptr Ptr = Addr, End = Addr + TotalAllocSize; Ptr < End; Ptr += ElementAllocSize) {
+    uptr Addr = (uptr)map(NULL, AllocCount*ElementAllocSize, "scudo:pool");
+    for (uptr i = 0; i < AllocCount; i++) {
+      uptr Ptr = Addr + i*ElementAllocSize;
       FreeList.push_front((FreeItem*)Ptr);
     }
+    
+    // Increase adaptively
+    AllocCount *= 2;
   }
 
   public:
   void initLinkerInitialized() {
     const uptr PageSize = getPageSizeCached();
-    const uptr AllocCount = 8;
+    AllocCount = 8;
     ElementAllocSize = roundUpTo(sizeof(T), PageSize);
-    TotalAllocSize = AllocCount * ElementAllocSize;
   }
 
   void init() { initLinkerInitialized(); }

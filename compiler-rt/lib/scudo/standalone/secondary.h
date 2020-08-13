@@ -343,7 +343,8 @@ private:
 
   // Lock Mutex, and ensure that the scan (iterateOverBlocks()) is not currently in H.
   // If so, we cannot remove H now, as that would disrupt the scan.
-  void lockOn(LargeBlock::Header* H);
+  inline void lockOn(LargeBlock::Header* H);
+  void lockOnSlow(LargeBlock::Header* H);
 };
 
 // As with the Primary, the size passed to this function includes any desired
@@ -472,10 +473,6 @@ template <class CacheT> void MapAllocator<CacheT>::deallocate(void *Ptr) {
 }
 
 template <class CacheT> void MapAllocator<CacheT>::recycle(const LargeBlock::SavedHeader& Header) {
-  {
-    ScopedLock L(Mutex);
-    Stats.sub(StatMapped, Header.MapSize);
-  }
   if (CacheT::canCache(Header.BlockEnd - Header.Block)) {
     if (Cache.store(Header))
       return;
@@ -490,13 +487,16 @@ template <class CacheT> LargeBlock::SavedHeader MapAllocator<CacheT>::decommit(v
   LargeBlock::Header *H = LargeBlock::getHeader(Ptr);
   const uptr Block = reinterpret_cast<uptr>(H);
   const uptr CommitSize = H->BlockEnd - Block;
-  {
-    ScopedLock L(Mutex);
-    InUseBlocks.remove(H);
-    FreedBytes += CommitSize;
-    NumberOfFrees++;
-    Stats.sub(StatAllocated, CommitSize);
-  }
+
+  lockOn(H);
+
+  InUseBlocks.remove(H);
+  FreedBytes += CommitSize;
+  NumberOfFrees++;
+  Stats.sub(StatAllocated, CommitSize);
+  Stats.sub(StatMapped, H->MapSize);
+
+  Mutex.unlock();
 
   LargeBlock::SavedHeader Save;
   Save.Block = Block;
@@ -511,15 +511,24 @@ template <class CacheT> LargeBlock::SavedHeader MapAllocator<CacheT>::decommit(v
 }
 
 template <class CacheT>
-void MapAllocator<CacheT>::lockOn(LargeBlock::Header* H) {
+inline void MapAllocator<CacheT>::lockOn(LargeBlock::Header* H) {
+  Mutex.lock();
+  if (IterBlock != H) return; // success
+
+  Mutex.unlock();
+  lockOnSlow(H);
+}
+
+template <class CacheT>
+void MapAllocator<CacheT>::lockOnSlow(LargeBlock::Header* H) {
   const u8 NumTries = 3U;
   const u8 NumSpinTries = 8U;
   const u8 NumYields = 8U;
 
   for (u8 Tries = 0; Tries < NumTries; Tries++) {
     for (u8 t = 0; t < NumSpinTries; t++) {
-      if (IterBlock != H) break;
       yieldProcessor(NumYields);
+      if (IterBlock != H) break;
     }
 
     Mutex.lock();
