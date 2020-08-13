@@ -52,16 +52,38 @@ public:
   }
 
   void clear(uptr From, uptr To) {
+    const mapValT startMask = ~(subMask(From)-1); // 1s at & above subIndex(From)
+    const mapValT endMask = ((subMask(To)<<1)-1); // 1s at & below subIndex(To)
+
     const uptr startIndex = arrIndex(From);
-    const uptr endIndex = arrIndex(To) + (subIndex(To) > 0);
+    const uptr endIndex = arrIndex(To);
 
-    const uptr startPage = roundDownTo(startIndex, ENTRIES_PER_PAGE);
-    const uptr endPage = roundUpTo(endIndex, ENTRIES_PER_PAGE);
+    if (startIndex == endIndex) {
+      mapValT mask = startMask & endMask; // single entry -- 1s from From to To
+      atomic_and_fetch(&Map[startIndex], ~mask);
+      return;
+    } else {
+      // Zero start and end
+      atomic_and_fetch(&Map[startIndex], ~startMask);
+      atomic_and_fetch(&Map[endIndex], ~endMask);
 
-    // Unmap full pages in the middle
-    uptr releaseStart = (uptr)&Map[startPage];
-    uptr releaseSize = endPage - startPage;
-    releasePagesToOS(releaseStart, 0, releaseSize * sizeof(mapT));
+      // Zero partial pages at start and end
+      const uptr firstFullPage = roundUpTo(startIndex+1, ENTRIES_PER_PAGE);
+      const uptr lastFullPage = roundDownTo(endIndex, ENTRIES_PER_PAGE);
+      for (uptr index = startIndex+1; (index < firstFullPage) && (index < endIndex); index++) {
+        atomic_store_relaxed(&Map[index], 0);
+      }
+      if (firstFullPage <= lastFullPage) {
+        for (uptr index = lastFullPage; index < endIndex; index++) {
+          atomic_store_relaxed(&Map[index], 0);
+        }
+      }
+
+      // Unmap full pages in the middle
+      uptr releaseStart = (uptr)&Map[firstFullPage];
+      uptr releaseSize = lastFullPage - firstFullPage;
+      releasePagesToOS(releaseStart, 0, releaseSize * sizeof(mapT));
+    }
   }
 
   bool operator[](uptr Index) {
