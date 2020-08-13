@@ -72,6 +72,9 @@ void *map(void *Addr, uptr Size, UNUSED const char *Name, uptr Flags,
       dieOnMapUnmapError(errno == ENOMEM);
     return nullptr;
   }
+  if (Flags & MAP_ONDEMAND)
+    madvise((void*)Addr, Size, MADV_NOHUGEPAGE);
+
 #if SCUDO_ANDROID
   if (!(Flags & MAP_NOACCESS))
     prctl(ANDROID_PR_SET_VMA, ANDROID_PR_SET_VMA_ANON_NAME, P, Size, Name);
