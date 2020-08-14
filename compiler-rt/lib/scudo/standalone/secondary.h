@@ -63,7 +63,8 @@ class MapAllocatorNoCache {
 public:
   void initLinkerInitialized(UNUSED s32 ReleaseToOsInterval) {}
   void init(UNUSED s32 ReleaseToOsInterval) {}
-  bool retrieve(UNUSED uptr Size, UNUSED LargeBlock::Header **H) {
+  bool retrieve(UNUSED uptr Size, UNUSED LargeBlock::Header **H,
+                UNUSED FillContentsMode FillContents) {
     return false;
   }
   bool store(UNUSED LargeBlock::Header *H) { return false; }
@@ -121,31 +122,44 @@ public:
     return store(Entry);
   }
 
-  bool retrieve(uptr Size, LargeBlock::Header **H) {
+  bool retrieve(uptr Size, LargeBlock::Header **H, FillContentsMode FillContents) {
+    bool Fill = false;
+    bool Served = false;
     const uptr PageSize = getPageSizeCached();
-    ScopedLock L(Mutex);
-    if (EntriesCount == 0)
-      return false;
-    for (uptr I = 0; I < MaxEntriesCount; I++) {
-      if (!Entries[I].Block)
-        continue;
-      const uptr BlockSize = Entries[I].BlockEnd - Entries[I].Block;
-      if (Size > BlockSize)
-        continue;
-      if (Size < BlockSize - PageSize * 4U)
-        continue;
-      *H = reinterpret_cast<LargeBlock::Header *>(Entries[I].Block);
-      Entries[I].Block = 0;
-      if (Entries[I].NoAccess)
-        map((void*)*H, Entries[I].BlockEnd - (uptr)*H, "scudo:secondary:recommit");
-      (*H)->BlockEnd = Entries[I].BlockEnd;
-      (*H)->MapBase = Entries[I].MapBase;
-      (*H)->MapSize = Entries[I].MapSize;
-      (*H)->Data = Entries[I].Data;
-      EntriesCount--;
-      return true;
+    {
+      ScopedLock L(Mutex);
+      if (EntriesCount == 0)
+        return false;
+      for (uptr I = 0; I < MaxEntriesCount; I++) {
+        if (!Entries[I].Block)
+          continue;
+        const uptr BlockSize = Entries[I].BlockEnd - Entries[I].Block;
+        if (Size > BlockSize)
+          continue;
+        if (Size < BlockSize - PageSize * 4U)
+          continue;
+        *H = reinterpret_cast<LargeBlock::Header *>(Entries[I].Block);
+        Entries[I].Block = 0;
+        if (Entries[I].NoAccess) {
+          map((void*)*H, Entries[I].BlockEnd - (uptr)*H, "scudo:secondary:recommit");
+        } else Fill = FillContents;
+        (*H)->BlockEnd = Entries[I].BlockEnd;
+        (*H)->MapBase = Entries[I].MapBase;
+        (*H)->MapSize = Entries[I].MapSize;
+        (*H)->Data = Entries[I].Data;
+        EntriesCount--;
+        Served = true;
+        break;
+      }
     }
-    return false;
+
+    if (UNLIKELY(Fill)) {
+        void *Ptr = reinterpret_cast<void *>(reinterpret_cast<uptr>(*H) +
+                                               LargeBlock::getHeaderSize());
+        memset(Ptr, FillContents == ZeroFill ? 0 : PatternFillByte,
+               (*H)->BlockEnd - reinterpret_cast<uptr>(Ptr));
+    }
+    return Served;
   }
 
   static bool canCache(uptr Size) {
@@ -374,14 +388,11 @@ void *MapAllocator<CacheT>::allocate(uptr Size, uptr AlignmentHint,
 
   if (AlignmentHint < PageSize && CacheT::canCache(RoundedSize)) {
     LargeBlock::Header *H;
-    if (Cache.retrieve(RoundedSize, &H)) {
+    if (Cache.retrieve(RoundedSize, &H, FillContents)) {
       if (BlockEnd)
         *BlockEnd = H->BlockEnd;
       void *Ptr = reinterpret_cast<void *>(reinterpret_cast<uptr>(H) +
                                            LargeBlock::getHeaderSize());
-      if (FillContents)
-        memset(Ptr, FillContents == ZeroFill ? 0 : PatternFillByte,
-               H->BlockEnd - reinterpret_cast<uptr>(Ptr));
       const uptr BlockSize = H->BlockEnd - reinterpret_cast<uptr>(H);
       {
         ScopedLock L(Mutex);
