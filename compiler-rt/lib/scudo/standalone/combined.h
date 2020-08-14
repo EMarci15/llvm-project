@@ -150,7 +150,8 @@ public:
   // - unlinking the local stats from the global ones (destroying the cache does
   //   the last two items).
   void commitBack(TSD<ThisT> *TSD) {
-    Quarantine.drain(&TSD->QuarantineCache);
+    bool f = false;
+    Quarantine.drain(&TSD->QuarantineCache, &f, NULL);
     TSD->Cache.destroy(&Stats);
   }
 
@@ -1011,10 +1012,10 @@ private:
           (Options.FillContents == NoFill) ? ZeroFill : Options.FillContents;
         memset(Ptr, FillContents == ZeroFill ? 0 : PatternFillByte, Size);
 
-        Quarantine.put(&TSD->QuarantineCache, Alloc);
+        Quarantine.put(&TSD->QuarantineCache, Alloc, &UnlockRequired, TSD);
       } else {
         LargeBlock::SavedHeader SavedHeader = Secondary.decommit(BlockBegin);
-        Quarantine.put(&TSD->QuarantineCache, SavedHeader);
+        Quarantine.put(&TSD->QuarantineCache, SavedHeader, &UnlockRequired, TSD);
       }
       if (UnlockRequired)
         TSD->unlock();

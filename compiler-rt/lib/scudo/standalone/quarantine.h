@@ -16,6 +16,7 @@
 #include "string_utils.h"
 #include "pool.h"
 #include "pthread.h"
+#include "tsd.h"
 
 namespace scudo {
 
@@ -314,6 +315,7 @@ public:
     Cache.initLinkerInitialized();
 
     pthread_cond_init(&SweeperCondition, NULL);
+    pthread_cond_init(&BackStopCondition, NULL);
     pthread_mutex_init(&SweeperMutex, NULL);
   }
   void init(AllocatorT *Allocator, uptr CacheSize) {
@@ -337,24 +339,26 @@ public:
 
   uptr getCacheSize() const { return atomic_load_relaxed(&MaxCacheSize); }
 
-  void put(CacheT *C, const SavedSmallAlloc& Alloc) {
+  void put(CacheT *C, const SavedSmallAlloc& Alloc,
+           bool *UnlockRequired, TSD<AllocatorT>* TSD) {
     C->enqueueSmall(Alloc);
     if (C->getSize() > getCacheSize())
-      drain(C);
+      drain(C, UnlockRequired, TSD);
   }
-  void put(CacheT *C, const LargeBlock::SavedHeader& Header) {
+  void put(CacheT *C, const LargeBlock::SavedHeader& Header,
+           bool *UnlockRequired, TSD<AllocatorT>* TSD) {
     C->enqueueLarge(Header);
     if (C->getSize() > getCacheSize())
-      drain(C);
+      drain(C, UnlockRequired, TSD);
   }
 
-  void NOINLINE drain(CacheT *C) {
+  void NOINLINE drain(CacheT *C, bool *UnlockRequired, TSD<AllocatorT>* TSD) {
     {
       ScopedLock L(CacheMutex);
       Cache.transfer(C);
     }
     if (sweepNeeded())
-      recycle();
+      recycle(UnlockRequired, TSD);
   }
 
   void NOINLINE drainAndRecycle(CacheT *C) {
@@ -362,14 +366,27 @@ public:
       ScopedLock L(CacheMutex);
       Cache.transfer(C);
     }
-    recycle();
+    bool f = false;
+    recycle(&f, NULL);
+  }
+
+  inline uptr effectiveSize() {
+    uptr FailedFrees = IgnoreFailedFreeSize*atomic_load_relaxed(&FailedFreeSize);
+    return Cache.getSize() - FailedFrees;
   }
 
   inline bool sweepNeeded() {
-    uptr FailedFrees = IgnoreFailedFreeSize*atomic_load_relaxed(&FailedFreeSize);
-    return ((Cache.getSize() - FailedFrees) > getMaxSize())
+    return (effectiveSize() > getMaxSize())
               || ((QuarantineCache::IgnoreDecommitSize)
                     && (Cache.LargeCache.getSize() > getMaxDecommitSize()));
+  }
+
+  inline bool backStopNeeded() {
+    constexpr uptr MB = 1024*1024;
+    constexpr uptr BackStopThreshold = 10;
+    constexpr uptr BackStopLeeway = 10*MB;
+
+    return effectiveSize() > BackStopThreshold*getMaxSize() + BackStopLeeway;
   }
 
   void getStats(ScopedString *Str) const {
@@ -398,6 +415,7 @@ public:
       // Wait until sweep is needed or program is shutting down
       bool SweepNeeded, ShutdownNeeded;
       pthread_mutex_lock(&SweeperMutex);
+      pthread_cond_broadcast(&BackStopCondition);
       while (true) {
         ShutdownNeeded = ShutdownSignal;
         SweepNeeded = sweepNeeded();
@@ -427,6 +445,7 @@ private:
   volatile bool SweeperThreadLaunched;
   pthread_mutex_t SweeperMutex;
   pthread_cond_t SweeperCondition;
+  pthread_cond_t BackStopCondition;
   volatile bool ShutdownSignal;
   ShadowT SmallShadowMap, LargeShadowMap;
   atomic_uptr FailedFreeSize;
@@ -437,7 +456,7 @@ private:
     pthread_mutex_unlock(&SweeperMutex);
   }
 
-  void recycle() {
+  void recycle(bool* UnlockRequired, TSD<AllocatorT>* TSD) {
     if (!pthread_mutex_trylock(&SweeperMutex)) {
       // Launch thread here. We use late initialisation for this to avoid deadlock in init()
       if (UNLIKELY(!SweeperThreadLaunched)) {
@@ -446,6 +465,15 @@ private:
       }
 
       pthread_cond_signal(&SweeperCondition);
+      
+      while (backStopNeeded()) {
+        if (*UnlockRequired) {
+          *UnlockRequired = false;
+          TSD->unlock();
+        }
+        pthread_cond_wait(&BackStopCondition, &SweeperMutex);
+      }
+
       pthread_mutex_unlock(&SweeperMutex);
     }
   }
