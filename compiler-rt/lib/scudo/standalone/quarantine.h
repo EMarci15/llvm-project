@@ -129,7 +129,16 @@ struct SpecificQuarantineCache {
     }
   }
 
-  void transfer(SpecificQuarantineCache *From) {
+  void transfer(SpecificQuarantineCache *From, bool merge) {
+    if (merge && (From->List.size() == 1)) {
+      BatchT *fromBatch = From->List.front();
+      if ((!List.empty()) && (List.back()->canMerge(fromBatch))) {
+        // Move over contents only
+        List.back()->merge(fromBatch);
+        return;
+      }
+    }
+
     List.append_back(&From->List);
     addToSize(From->getSize());
     atomic_store_relaxed(&From->Size, 0);
@@ -169,6 +178,16 @@ struct SpecificQuarantineCache {
       }
     }
     subFromSize(ExtractedSize);
+  }
+
+  void deallocateBatches() {
+    while (!List.empty()) {
+      BatchT *B = List.front();
+      DCHECK(B->Count == 0);
+
+      List.pop_front();
+      BatchT::deallocate(B);
+    }
   }
 
   AddrLimits addrLimits() const {
@@ -244,8 +263,8 @@ struct QuarantineCache {
   }
 
   void transfer(QuarantineCache *From) {
-    SmallCache.transfer(&From->SmallCache);
-    LargeCache.transfer(&From->LargeCache);
+    SmallCache.transfer(&From->SmallCache, 0);
+    LargeCache.transfer(&From->LargeCache, 1);
   }
 
   inline void enqueueBatch(SmallBatchT *B) {
@@ -425,8 +444,7 @@ private:
     LargeShadowMap.clear();
 
     DCHECK(ToCheck.empty());
-    DCHECK(NewlyQuarantined.empty());
-    DCHECK(FailedFrees.empty());
+    FailedFrees.LargeCache.deallocateBatches();
   }
 
   inline void doSweepAndMark(const AddrLimits& SmallLimits, const AddrLimits& LargeLimits) {
