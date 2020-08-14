@@ -393,6 +393,7 @@ private:
           roundUpTo(TotalUserBytes - MappedUser, MapSizeIncrement);
       const uptr RegionBase = RegionBeg - getRegionBaseByClassId(ClassId);
       if (UNLIKELY(RegionBase + MappedUser + UserMapSize > RegionSize)) {
+        // TODO(marton) This is more likely now due to longer quarantine times... lock & wait?
         if (!Region->Exhausted) {
           Region->Exhausted = true;
           ScopedString Str(1024);

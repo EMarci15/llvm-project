@@ -237,6 +237,8 @@ struct QuarantineCache {
   using SmallCacheT = SpecificQuarantineCache<SavedSmallAlloc, SmallBatchCount>;
   using LargeCacheT = SpecificQuarantineCache<LargeBlock::SavedHeader, LargeBatchCount>;
 
+  static constexpr bool IgnoreDecommitSize = true;
+
   SmallCacheT SmallCache;
   LargeCacheT LargeCache;
   using SmallBatchT = SmallCacheT::BatchT;
@@ -250,7 +252,9 @@ struct QuarantineCache {
   }
 
   // Total memory used, including internal accounting.
-  uptr getSize() const { return SmallCache.getSize() + LargeCache.getSize(); }
+  uptr getSize() const {
+    return SmallCache.getSize() + (1-IgnoreDecommitSize)*LargeCache.getSize();
+  }
   // Memory used for internal accounting.
   uptr getOverheadSize() const
     { return SmallCache.getOverheadSize() + LargeCache.getOverheadSize();}
@@ -298,6 +302,13 @@ public:
   typedef GlobalQuarantine<AllocatorT, Node> ThisT;
   typedef ShadowBitMap ShadowT;
 
+  static constexpr uptr SweepThreshold
+                          = /* Sweep when */25/* % of all allocated memory is in quarantine...*/;
+  static constexpr uptr DecommitThreshold
+                          = /* ...or decommitted memory size */900/* % of allocated memory. */;
+  static constexpr bool IgnoreFailedFreeSize = true;
+  static constexpr uptr SmallGranuleSize = 8/* Bytes */;
+
   void initLinkerInitialized(uptr CacheSize) {
     atomic_store_relaxed(&MaxCacheSize, CacheSize);
     Cache.initLinkerInitialized();
@@ -317,9 +328,13 @@ public:
     killSweeperThread();
   }
 
-  uptr getMaxSize() const {
+  inline uptr getMaxSize() const {
     return SweepThreshold * Allocator->getTotalAllocatedUser() / 100;
   }
+  inline uptr getMaxDecommitSize() const {
+    return DecommitThreshold * Allocator->getTotalAllocatedUser() / 100;
+  }
+
   uptr getCacheSize() const { return atomic_load_relaxed(&MaxCacheSize); }
 
   void put(CacheT *C, const SavedSmallAlloc& Alloc) {
@@ -338,7 +353,7 @@ public:
       ScopedLock L(CacheMutex);
       Cache.transfer(C);
     }
-    if (Cache.getSize() > getMaxSize())
+    if (sweepNeeded())
       recycle();
   }
 
@@ -348,6 +363,13 @@ public:
       Cache.transfer(C);
     }
     recycle();
+  }
+
+  inline bool sweepNeeded() {
+    uptr FailedFrees = IgnoreFailedFreeSize*atomic_load_relaxed(&FailedFreeSize);
+    return ((Cache.getSize() - FailedFrees) > getMaxSize())
+              || ((QuarantineCache::IgnoreDecommitSize)
+                    && (Cache.LargeCache.getSize() > getMaxDecommitSize()));
   }
 
   void getStats(ScopedString *Str) const {
@@ -378,7 +400,7 @@ public:
       pthread_mutex_lock(&SweeperMutex);
       while (true) {
         ShutdownNeeded = ShutdownSignal;
-        SweepNeeded = Cache.getSize() > getMaxSize();
+        SweepNeeded = sweepNeeded();
         if (ShutdownNeeded | SweepNeeded)
           break;
         pthread_cond_wait(&SweeperCondition, &SweeperMutex);
@@ -400,8 +422,6 @@ private:
   AllocatorT *Allocator;
   atomic_uptr MaxSize;
   alignas(SCUDO_CACHE_LINE_SIZE) atomic_uptr MaxCacheSize;
-  const uptr SweepThreshold = /* Sweep when */25/* % of all allocated memory is quarantined. */;
-  const uptr SmallGranuleSize = 8/* Bytes */; 
   // Sweeper thread
   pthread_t SweeperThread;
   volatile bool SweeperThreadLaunched;
@@ -409,6 +429,7 @@ private:
   pthread_cond_t SweeperCondition;
   volatile bool ShutdownSignal;
   ShadowT SmallShadowMap, LargeShadowMap;
+  atomic_uptr FailedFreeSize;
 
   void killSweeperThread() {
     pthread_mutex_lock(&SweeperMutex);
@@ -439,6 +460,7 @@ private:
     CacheT FailedFrees;
     FailedFrees.init();
     recycleUnmarked(FailedFrees, ToCheck);
+    atomic_store_relaxed(&FailedFreeSize, FailedFrees.getSize());
     Cache.transfer(&FailedFrees); // Reinsert failed frees
     SmallShadowMap.clear();
     LargeShadowMap.clear();

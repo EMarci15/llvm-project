@@ -198,8 +198,8 @@ enum FillContentsMode {
                         // zero-initialized already.
 };
 
-#define MIN_HEAP_ADDR 0
-#define MAX_HEAP_ADDR (((uptr)1)<<47)
+constexpr uptr MIN_HEAP_ADDR = 0;
+constexpr uptr MAX_HEAP_ADDR = (((uptr)1)<<47);
 
 struct AddrLimits {
   uptr MinAddr, MaxAddr;

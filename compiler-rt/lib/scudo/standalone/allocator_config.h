@@ -26,8 +26,8 @@ namespace scudo {
 struct DefaultConfig {
   using SizeClassMap = DefaultSizeClassMap;
 #if SCUDO_CAN_USE_PRIMARY64
-  // 1GB Regions
-  typedef SizeClassAllocator64<SizeClassMap, 30U> Primary;
+  // 2GB Regions
+  typedef SizeClassAllocator64<SizeClassMap, 31U> Primary;
 #else
   // 512KB regions
   typedef SizeClassAllocator32<SizeClassMap, 19U> Primary;
