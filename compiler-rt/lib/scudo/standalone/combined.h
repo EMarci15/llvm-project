@@ -845,6 +845,7 @@ public:
         return;
   }
 
+  inline AddrLimits primaryLimits() { return Primary.limits(); }
 private:
   using SecondaryT = typename Params::Secondary;
   typedef typename PrimaryT::SizeClassMap SizeClassMap;

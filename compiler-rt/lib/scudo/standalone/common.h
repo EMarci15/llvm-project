@@ -197,6 +197,24 @@ enum FillContentsMode {
                         // zero-initialized already.
 };
 
+#define MIN_HEAP_ADDR 0
+#define MAX_HEAP_ADDR (((uptr)1)<<47)
+
+struct AddrLimits {
+  uptr MinAddr, MaxAddr;
+  inline uptr size() { return MaxAddr - MinAddr; }
+
+  AddrLimits(): MinAddr(MAX_HEAP_ADDR), MaxAddr(MIN_HEAP_ADDR) {}
+  AddrLimits(uptr MinAddr, uptr MaxAddr): MinAddr(MinAddr), MaxAddr(MaxAddr) {}
+  AddrLimits(const AddrLimits& other): MinAddr(other.MinAddr), MaxAddr(other.MaxAddr) {}
+
+  inline void combine(const AddrLimits& other) {
+    if (other.MinAddr < MinAddr) MinAddr = other.MinAddr;
+    if (other.MaxAddr > MaxAddr) MaxAddr = other.MaxAddr;
+  }
+  inline bool contains(const uptr Ptr) const { return ((Ptr >= MinAddr) && (Ptr < MaxAddr)); }
+};
+
 } // namespace scudo
 
 #endif // SCUDO_COMMON_H_

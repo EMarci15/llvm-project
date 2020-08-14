@@ -19,23 +19,6 @@
 
 namespace scudo {
 
-#define MIN_HEAP_ADDR 0
-#define MAX_HEAP_ADDR (((uptr)1)<<47)
-
-struct AddrLimits {
-  uptr MinAddr, MaxAddr;
-
-  AddrLimits(): MinAddr(MAX_HEAP_ADDR), MaxAddr(MIN_HEAP_ADDR) {}
-  AddrLimits(uptr MinAddr, uptr MaxAddr): MinAddr(MinAddr), MaxAddr(MaxAddr) {}
-  AddrLimits(const AddrLimits& other): MinAddr(other.MinAddr), MaxAddr(other.MaxAddr) {}
-
-  inline void combine(const AddrLimits& other) {
-    if (other.MinAddr < MinAddr) MinAddr = other.MinAddr;
-    if (other.MaxAddr > MaxAddr) MaxAddr = other.MaxAddr;
-  }
-  inline bool contains(const uptr Ptr) const { return ((Ptr >= MinAddr) && (Ptr < MaxAddr)); }
-};
-
 struct SavedSmallAlloc {
   void *Ptr;
   uptr Size;
@@ -277,13 +260,6 @@ struct QuarantineCache {
     LargeCache.mergeBatches();
   }
 
-  AddrLimits addrLimits() const {
-    AddrLimits Result = SmallCache.addrLimits();
-    Result.combine(LargeCache.addrLimits());
-    
-    return Result;
-  }
-
   void getStats(ScopedString *Str) const {
     SmallCache.getStats(Str);
     LargeCache.getStats(Str);
@@ -372,7 +348,9 @@ public:
 
   // Point of entry for SweeperThread
   void sweeperThreadMain() {
-    ShadowMap.init(MIN_HEAP_ADDR, MAX_HEAP_ADDR - MIN_HEAP_ADDR, GranuleSize);
+    AddrLimits PrimaryLimits = Allocator->primaryLimits();
+    SmallShadowMap.init(PrimaryLimits.MinAddr, PrimaryLimits.size(), SmallGranuleSize);
+    LargeShadowMap.init(MIN_HEAP_ADDR, MAX_HEAP_ADDR - MIN_HEAP_ADDR, getPageSizeCached());
 
     // Repeat until program exit
     while (true) {
@@ -404,14 +382,14 @@ private:
   atomic_uptr MaxSize;
   alignas(SCUDO_CACHE_LINE_SIZE) atomic_uptr MaxCacheSize;
   const uptr SweepThreshold = /* Sweep when */25/* % of all allocated memory is quarantined. */;
-  const uptr GranuleSize = 16/* Bytes */; 
+  const uptr SmallGranuleSize = 8/* Bytes */; 
   // Sweeper thread
   pthread_t SweeperThread;
   volatile bool SweeperThreadLaunched;
   pthread_mutex_t SweeperMutex;
   pthread_cond_t SweeperCondition;
   volatile bool ShutdownSignal;
-  ShadowT ShadowMap;
+  ShadowT SmallShadowMap, LargeShadowMap;
 
   void killSweeperThread() {
     pthread_mutex_lock(&SweeperMutex);
@@ -435,34 +413,34 @@ private:
   void NOINLINE doSweepAndRecycle() {
     CacheT ToCheck = gatherContents();
     
-    AddrLimits PointerLimits = ToCheck.addrLimits();
-    doSweepAndMark(PointerLimits);
+    AddrLimits SmallLimits = ToCheck.SmallCache.addrLimits();
+    AddrLimits LargeLimits = ToCheck.LargeCache.addrLimits();
+    doSweepAndMark(SmallLimits, LargeLimits);
 
     CacheT FailedFrees;
     FailedFrees.init();
-    
     recycleUnmarked(FailedFrees, ToCheck);
-    CacheT NewlyQuarantined = gatherContents();
-    recycleUnmarked(FailedFrees, NewlyQuarantined, /*CheckRange=*/true, PointerLimits);
-
     Cache.transfer(&FailedFrees); // Reinsert failed frees
-    ShadowMap.clear();
+    SmallShadowMap.clear();
+    LargeShadowMap.clear();
 
     DCHECK(ToCheck.empty());
     DCHECK(NewlyQuarantined.empty());
     DCHECK(FailedFrees.empty());
   }
 
-  inline void doSweepAndMark(const AddrLimits& Limits) {
+  inline void doSweepAndMark(const AddrLimits& SmallLimits, const AddrLimits& LargeLimits) {
     auto MarkingLambda = [&](uptr Ptr, uptr Size) -> void {
       uptr* const Begin = (uptr*) Ptr;
       uptr* const End = (uptr*) (Ptr + Size);
       for (uptr *Word = Begin; Word < End; Word++) {
         uptr Target = *Word;
         // Only mark if Target is in the plausible range
-        if (!Limits.contains(Target))
-            continue;
-        ShadowMap.set(Target);
+        if (SmallLimits.contains(Target)) {
+          SmallShadowMap.set(Target);
+        } else if (LargeLimits.contains(Target)) {
+          LargeShadowMap.set(Target);
+        }
       }
     };
 
@@ -495,9 +473,8 @@ private:
     return Result;
   }
 
-  template<class SpecificCacheT, typename SF, typename FF>
-  void checkUnmarked(SpecificCacheT &ToCheck, SF SuccessCb, FF FailureCb,
-                     bool CheckRange, AddrLimits Limits) {
+  template<class SpecificCacheT, typename SF, typename FF, typename MF>
+  void checkUnmarked(SpecificCacheT &ToCheck, SF SuccessCb, FF FailureCb, MF marked) {
     while (typename SpecificCacheT::BatchT *B = ToCheck.dequeueBatch()) {
       constexpr uptr NumberOfPrefetch = 8UL;
       CHECK(NumberOfPrefetch <= ARRAY_SIZE(B->Items));
@@ -511,13 +488,7 @@ private:
         uptr Size = End - Start;
         CHECK(Start);
 
-        // If something was inserted during the sweep, and it lies outside of the range
-        // of pointers we considered, then fail to free it, and re-check on the next sweep
-        bool OutOfRange = CheckRange
-                              && ((Item.minAddress() < Limits.MinAddr)
-                                    || (Item.maxAddress() > Limits.MaxAddr));
-
-        if (OutOfRange || marked(Start, Size)) {
+        if (marked(Start, Size)) {
           FailureCb(Item);
         } else {
           SuccessCb(Item);
@@ -527,8 +498,7 @@ private:
     }
   }
 
-  inline void recycleUnmarked(CacheT &FailedFrees, CacheT &ToCheck, bool CheckRange = false,
-                                AddrLimits Limits = AddrLimits()) {
+  inline void recycleUnmarked(CacheT &FailedFrees, CacheT &ToCheck) {
     auto SmallFailureCb =
       [&FailedFrees](const SavedSmallAlloc& Item) -> void { FailedFrees.enqueueSmall(Item); };
     auto SmallSuccessCb = [this](const SavedSmallAlloc& Item) -> void {
@@ -540,13 +510,15 @@ private:
     auto LargeSuccessCb = [this](const LargeBlock::SavedHeader& Item) -> void {
       Allocator->recycleChunk(Item);
     };
-    
-    checkUnmarked(ToCheck.SmallCache, SmallSuccessCb, SmallFailureCb, CheckRange, Limits);
-    checkUnmarked(ToCheck.LargeCache, LargeSuccessCb, LargeFailureCb, CheckRange, Limits);
-  }
+    auto SmallMarked = [this](uptr Ptr, uptr Size) -> bool {
+      return !SmallShadowMap.allZero(Ptr, Ptr+Size);
+    };
+    auto LargeMarked = [this](uptr Ptr, uptr Size) -> bool {
+      return !LargeShadowMap.allZero(Ptr, Ptr+Size);
+    };
 
-  inline bool marked(uptr Ptr, uptr Size) {
-    return !ShadowMap.allZero(Ptr, Ptr+Size);
+    checkUnmarked(ToCheck.SmallCache, SmallSuccessCb, SmallFailureCb, SmallMarked);
+    checkUnmarked(ToCheck.LargeCache, LargeSuccessCb, LargeFailureCb, LargeMarked);
   }
 };
 

@@ -64,6 +64,10 @@ public:
 
   static bool canAllocate(uptr Size) { return Size <= SizeClassMap::MaxSize; }
 
+  AddrLimits limits() const {
+    return AddrLimits(PrimaryBase, PrimaryBase+PrimarySize);
+  }
+
   void initLinkerInitialized(s32 ReleaseToOsInterval) {
     // Reserve the space required for the Primary.
     PrimaryBase = reinterpret_cast<uptr>(
