@@ -101,6 +101,7 @@ public:
     Entry.MapSize = H.MapSize;
     Entry.Data = H.Data;
     Entry.Time = 0; // Already released
+    Entry.NoAccess = true;
 
     return store(Entry);
   }
@@ -115,6 +116,7 @@ public:
     Entry.MapSize = H->MapSize;
     Entry.Data = H->Data;
     Entry.Time = Time;
+    Entry.NoAccess = false;
 
     return store(Entry);
   }
@@ -134,6 +136,8 @@ public:
         continue;
       *H = reinterpret_cast<LargeBlock::Header *>(Entries[I].Block);
       Entries[I].Block = 0;
+      if (Entries[I].NoAccess)
+        map((void*)*H, Entries[I].BlockEnd - (uptr)*H, "scudo:secondary:recommit");
       (*H)->BlockEnd = Entries[I].BlockEnd;
       (*H)->MapBase = Entries[I].MapBase;
       (*H)->MapSize = Entries[I].MapSize;
@@ -214,6 +218,7 @@ private:
     uptr MapBase;
     uptr MapSize;
     MapPlatformData Data;
+    bool NoAccess;
     u64 Time;
   };
   
@@ -506,6 +511,7 @@ template <class CacheT> LargeBlock::SavedHeader MapAllocator<CacheT>::decommit(v
   Save.Data = H->Data;
 
   MapPlatformData Data = H->Data;
+  map((void*)Block, Save.BlockEnd - Block, "scudo:secondary:decommit", MAP_NOACCESS);
   releasePagesToOS(Block, 0, Save.BlockEnd - Block, &Data);
   return Save;
 }

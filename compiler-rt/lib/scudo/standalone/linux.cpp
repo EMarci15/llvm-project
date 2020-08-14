@@ -62,8 +62,6 @@ void *map(void *Addr, uptr Size, UNUSED const char *Name, uptr Flags,
       MmapFlags |= MAP_NORESERVE;
   }
   if (Addr) {
-    // Currently no scenario for a noaccess mapping with a fixed address.
-    DCHECK_EQ(Flags & MAP_NOACCESS, 0);
     MmapFlags |= MAP_FIXED;
   }
   void *P = mmap(Addr, Size, MmapProt, MmapFlags, -1, 0);
