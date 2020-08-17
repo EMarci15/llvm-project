@@ -11,6 +11,7 @@
 
 #include "atomic_helpers.h"
 #include "common.h"
+#include "memory_range_registry.h"
 #include "mutex.h"
 
 #include <limits.h> // for PTHREAD_DESTRUCTOR_ITERATIONS
@@ -27,9 +28,11 @@ template <class Allocator> struct alignas(SCUDO_CACHE_LINE_SIZE) TSD {
   typename Allocator::CacheT Cache;
   typename Allocator::QuarantineCacheT QuarantineCache;
   u8 DestructorIterations;
+  uptr StackRegistryIndex;
 
   void initLinkerInitialized(Allocator *Instance) {
     Instance->initCache(&Cache);
+    Instance->registerStack(StackRegistryIndex);
     DestructorIterations = PTHREAD_DESTRUCTOR_ITERATIONS;
   }
   void init(Allocator *Instance) {

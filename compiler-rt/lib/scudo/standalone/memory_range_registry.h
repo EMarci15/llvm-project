@@ -10,8 +10,10 @@
 #define SCUDO_MEMORY_RANGE_REGISTRY_H_
 
 #include "list.h"
+#include "mutex.h"
 #include "proc_maps_parse.h"
-#include "stdio.h"
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace scudo {
 
@@ -20,16 +22,14 @@ namespace scudo {
 // Mutable sections of .data and .bss are obtained by parsing /proc/self/maps at startup,
 // the stack of each thread is estimated periodically.
 
-#define MEMRANGE_SIZE 256
+#define MEMRANGE_SIZE 512
 
 struct MemRange {
-  uptr Begin, Size;
-  MemRange(): Begin(0), Size(0) {}
-  MemRange(MemRange& Other): Begin(Other.Begin), Size(Other.Size) {}
-  MemRange(uptr Begin, uptr Size): Begin(Begin), Size(Size) {}
+  uptr Begin, End;
+  MemRange(): Begin(0), End(0) {}
+  MemRange(MemRange& Other): Begin(Other.Begin), End(Other.End) {}
+  MemRange(uptr Begin, uptr End): Begin(Begin), End(End) {}
 };
-
-static void registerMapRanges(MemRange *Ranges, uptr& Size);
 
 class MemoryRangeRegistry {
 public:
@@ -42,11 +42,26 @@ public:
     initMaybe();
 
     for (uptr i=0; i<RangeCount; i++)
-      Callback(Ranges[i].Begin, Ranges[i].Size);
+      Callback(Ranges[i].Begin, Ranges[i].End-Ranges[i].Begin);
+  }
 
-    // TODO(marton) iterate stacks
+  void registerStack(uptr& RangeIndex) {
+    uptr PageSize = getPageSizeCached();
+    volatile uptr localVar = 1;
+
+    if (UNLIKELY(!RangeIndex)) {
+      initMaybe();
+      ScopedLock L(Mutex);
+      RangeIndex = RangeCount++;
+      Ranges[RangeIndex].Begin = roundDownTo((uptr)&localVar, PageSize);
+      Ranges[RangeIndex].End = Ranges[RangeIndex].Begin+PageSize;
+      return;
+    }
+
+    Ranges[RangeIndex].Begin = roundDownTo((uptr)&localVar, PageSize);
   }
 private:
+  HybridMutex Mutex;
   uptr RangeCount;
   MemRange Ranges[MEMRANGE_SIZE];
 
@@ -54,40 +69,64 @@ private:
   void initMaybe() {
     if (LIKELY(RangeCount))
       return;
+    memset(this, 0, sizeof(this));
 
-    registerMapRanges(Ranges, RangeCount);
+    registerMapRanges();
     DCHECK_GT(RangeCount, 0);
   }
+
+  void registerMapRanges();
 };
 
-void registerMapRanges(MemRange *Ranges, uptr& Size) {
-    FILE *maps = fopen("/proc/self/maps", "r");
+void MemoryRangeRegistry::registerMapRanges() {
+    ScopedLock L(Mutex);
+    int fmaps = open("/proc/self/maps", O_RDONLY);
+    CHECK(fmaps >= 0);
     char buff[255];
-    while (fgets(buff, sizeof(buff), maps) != NULL) {
-        ProcRegion pr(buff);
+    char *e = buff;
+    char *b = buff;
 
-        // Do not scan regions with special protection (unused or not containing heap ptrs)
-        if (!pr.readable || !pr.writable || pr.executable) continue;
+    while (true) {
+      char *le = b;
+      while ((le < e) && (*le != '\n')) le++;
 
-        // Heap regions should be handled via extent registration (managed) to avoid
-        //     scanning jemalloc metadata, ngc regions and double-scanning
-        if ((!pr.has_path) || (pr.heap) || (pr.stack)) continue;
+      if (le == e) {
+        char *x = buff;
+        for (char *y = b; y < e; x++, y++)
+          *x = *y;
+        le = e = x;
+        b = buff;
 
-        // Do not scan shared mappings to mmap'd files (should not contain pointers)
-        // Note: .text .bss and .data are mapped as private file mappings
-        if (!pr.CoW) continue;
+        e += read(fmaps, le, (&buff[255]-le));
+        while ((le < e) && (*le != '\n')) le++;
+        if (le == e) break;
+      }
 
-        // Ignore large mappings (these likely just take advantage of overcommitting)
-        if ((pr.end_ptr - pr.start_ptr) > (1ll << 30)/*1GB*/) continue;
+      ProcRegion pr(b);
+      b = le+1;
 
-        // Ignore regions mapped from jemalloc. These may be for metadata that should be
-        // conceptually non-garbage-collected.
-        if (pr.from_jemalloc) continue;
+      // Do not scan regions with special protection (unused or not containing heap ptrs)
+      if (!pr.readable || !pr.writable || pr.executable) continue;
 
-        Ranges[Size++] = MemRange(pr.start_ptr, pr.end_ptr-pr.start_ptr);
+      // Heap regions should be handled via extent registration (managed) to avoid
+      //     scanning jemalloc metadata, ngc regions and double-scanning
+      if ((!pr.has_path) || (pr.heap) || (pr.stack)) continue;
+
+      // Do not scan shared mappings to mmap'd files (should not contain pointers)
+      // Note: .text .bss and .data are mapped as private file mappings
+      if (!pr.CoW) continue;
+
+      // Ignore large mappings (these likely just take advantage of overcommitting)
+      if ((pr.end_ptr - pr.start_ptr) > (1ll << 30)/*1GB*/) continue;
+
+      // Ignore regions mapped from jemalloc. These may be for metadata that should be
+      // conceptually non-garbage-collected.
+      if (pr.from_jemalloc) continue;
+
+      Ranges[RangeCount++] = MemRange(pr.start_ptr, pr.end_ptr);
     }
 
-    fclose(maps);
+    close(fmaps);
 }
 
 } // namespace scudo

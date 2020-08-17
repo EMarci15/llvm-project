@@ -843,6 +843,11 @@ public:
   }
 
   inline AddrLimits primaryLimits() { return Primary.limits(); }
+
+  inline void registerStack(uptr& RegistryIndex) {
+    MemRangeRegistry.registerStack(RegistryIndex);
+  }
+
 private:
   using SecondaryT = typename Params::Secondary;
   typedef typename PrimaryT::SizeClassMap SizeClassMap;

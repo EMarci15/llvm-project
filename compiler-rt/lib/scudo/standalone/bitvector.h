@@ -66,8 +66,8 @@ public:
       Map[endIndex] &= ~endMask;
 
       // Zero partial pages at start and end
-      const uptr firstFullPage = roundUpTo(startIndex+1, ENTRIES_PER_PAGE);
-      const uptr lastFullPage = roundDownTo(endIndex, ENTRIES_PER_PAGE);
+      const uptr firstFullPage = roundUpTo(startIndex, ENTRIES_PER_PAGE);
+      const uptr lastFullPage = roundDownTo(endIndex+1, ENTRIES_PER_PAGE);
       for (uptr index = startIndex+1; (index < firstFullPage) && (index < endIndex); index++) {
         Map[index] = 0;
       }

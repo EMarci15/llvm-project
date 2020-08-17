@@ -460,6 +460,9 @@ private:
   }
 
   void recycle(bool* UnlockRequired, TSD<AllocatorT>* TSD) {
+    if (LIKELY(TSD))
+      Allocator->registerStack(TSD->StackRegistryIndex);
+
     if (!pthread_mutex_trylock(&SweeperMutex)) {
       // Launch thread here. We use late initialisation for this to avoid deadlock in init()
       if (UNLIKELY(!SweeperThreadLaunched)) {
