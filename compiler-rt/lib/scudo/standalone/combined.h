@@ -640,7 +640,7 @@ public:
   }
 
   uptr getTotalAllocatedUser() {
-    return Primary.getTotalAllocatedUser() + Secondary.getTotalAllocatedUser();
+    return Primary.getTotalActiveUser() + Secondary.getTotalAllocatedUser();
   }
 
   bool canReturnNull() {

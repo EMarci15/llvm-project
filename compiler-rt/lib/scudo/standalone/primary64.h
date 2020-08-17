@@ -92,7 +92,7 @@ public:
       // limit is mostly arbitrary and based on empirical observations.
       // TODO(kostyak): make the lower limit a runtime option
       Region->CanRelease = (I != SizeClassMap::BatchClassId) &&
-                           (getSizeByClassId(I) >= (PageSize / 32));
+                           (getSizeByClassId(I) >= (PageSize / 8));
       if (Region->CanRelease)
         Region->ReleaseInfo.LastReleaseAtNs = Time;
     }
@@ -100,6 +100,8 @@ public:
 
     if (SupportsMemoryTagging)
       UseMemoryTagging = systemSupportsMemoryTagging();
+
+    activePages.init(PrimaryBase, PrimarySize, PageSize);
   }
   void init(s32 ReleaseToOsInterval) {
     memset(this, 0, sizeof(*this));
@@ -124,6 +126,11 @@ public:
     }
     DCHECK_GT(B->getCount(), 0);
     Region->Stats.PoppedBlocks += B->getCount();
+    if (Region->CanRelease) {
+      for (u32 I = 0; I < B->getCount(); I++)
+        activePages.set((uptr)B->get(I));
+    }
+
     return B;
   }
 
@@ -133,8 +140,9 @@ public:
     ScopedLock L(Region->Mutex);
     Region->FreeList.push_front(B);
     Region->Stats.PushedBlocks += B->getCount();
-    if (Region->CanRelease)
+    if (Region->CanRelease) {
       releaseToOSMaybe(Region, ClassId);
+    }
   }
 
   void disable() {
@@ -174,9 +182,16 @@ public:
       if (I == SizeClassMap::BatchClassId)
         continue;
       const RegionInfo *Region = getRegionInfo(I);
+      
+      const uptr PageSize = getPageSizeCached();
+      const uptr BlockSize = Max(getSizeByClassId(I), PageSize);
+      
       const uptr From = Region->RegionBeg;
-      const uptr Size = Region->AllocatedUser;
-      Callback(From, Size);
+      const uptr To = From + Region->AllocatedUser;
+      for (uptr Block = From; Block < To; Block += BlockSize) {
+        if ((!Region->CanRelease) || activePages[Block])
+            Callback(Block, BlockSize);
+      }
     }
   }
 
@@ -201,14 +216,9 @@ public:
       getStats(Str, I, 0);
   }
 
-  uptr getTotalAllocatedUser() {
-    uptr Result = 0;
-    for (uptr I = 0; I != NumClasses; ++I) {
-      if (I == SizeClassMap::BatchClassId)
-        continue;
-      Result += RegionInfoArray[I].AllocatedUser;
-    }
-    return Result;
+  // Lower bound (newly allocated, reused after last release not counted)
+  uptr getTotalActiveUser() {
+    return atomic_load_relaxed(&TotalActiveUser);
   }
 
   void setReleaseToOsIntervalMs(s32 Interval) {
@@ -227,7 +237,14 @@ public:
       ScopedLock L(Region->Mutex);
       TotalReleasedBytes += releaseToOSMaybe(Region, I, /*Force=*/true);
     }
+
     return TotalReleasedBytes;
+  }
+
+  void activatePage(uptr page) {
+    if (!activePages[page]) {
+      activePages.set(page);
+    }
   }
 
   bool useMemoryTagging() const {
@@ -304,6 +321,7 @@ private:
 
   struct ReleaseToOsInfo {
     uptr PushedBlocksAtLastRelease;
+    uptr ActiveAtLastRelease;
     uptr RangesReleased;
     uptr LastReleasedBytes;
     u64 LastReleaseAtNs;
@@ -333,6 +351,8 @@ private:
   atomic_s32 ReleaseToOsIntervalMs;
   bool UseMemoryTagging;
   alignas(SCUDO_CACHE_LINE_SIZE) RegionInfo RegionInfoArray[NumClasses];
+  alignas(SCUDO_CACHE_LINE_SIZE) ShadowBitMap activePages;
+  atomic_uptr TotalActiveUser;
 
   RegionInfo *getRegionInfo(uptr ClassId) {
     DCHECK_LT(ClassId, NumClasses);
@@ -496,17 +516,23 @@ private:
       }
     }
 
-    ReleaseRecorder Recorder(Region->RegionBeg, &Region->Data);
+    ReleaseRecorder Recorder(Region->RegionBeg, &activePages, &Region->Data);
     releaseFreeMemoryToOS(Region->FreeList, Region->RegionBeg,
                           Region->AllocatedUser, BlockSize, &Recorder);
-
-    if (Recorder.getReleasedRangesCount() > 0) {
-      Region->ReleaseInfo.PushedBlocksAtLastRelease =
+    
+    uptr LastActive = Region->ReleaseInfo.ActiveAtLastRelease;
+    uptr CurrentActive = Region->AllocatedUser - Recorder.getReleasedBytes();
+    Region->ReleaseInfo.LastReleasedBytes = Recorder.getReleasedBytes();
+    Region->ReleaseInfo.ActiveAtLastRelease = CurrentActive;
+    Region->ReleaseInfo.PushedBlocksAtLastRelease =
           Region->Stats.PushedBlocks;
-      Region->ReleaseInfo.RangesReleased += Recorder.getReleasedRangesCount();
-      Region->ReleaseInfo.LastReleasedBytes = Recorder.getReleasedBytes();
-    }
+    Region->ReleaseInfo.RangesReleased += Recorder.getReleasedRangesCount();
     Region->ReleaseInfo.LastReleaseAtNs = getMonotonicTime();
+    
+    // Change may be < 0, but TotalActiveUser >= 0; rely on unsigned overflow
+    uptr ActiveChange = CurrentActive - LastActive;
+    atomic_fetch_add(&TotalActiveUser, ActiveChange, memory_order_relaxed);
+
     return Recorder.getReleasedBytes();
   }
 };

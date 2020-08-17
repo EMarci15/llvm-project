@@ -18,8 +18,8 @@ namespace scudo {
 
 class ReleaseRecorder {
 public:
-  ReleaseRecorder(uptr BaseAddress, MapPlatformData *Data = nullptr)
-      : BaseAddress(BaseAddress), Data(Data) {}
+  ReleaseRecorder(uptr BaseAddress, ShadowBitMap *ActivePages, MapPlatformData *Data = nullptr)
+      : BaseAddress(BaseAddress), Data(Data), ActivePages(ActivePages) {}
 
   uptr getReleasedRangesCount() const { return ReleasedRangesCount; }
 
@@ -31,6 +31,8 @@ public:
     releasePagesToOS(BaseAddress, From, Size, Data);
     ReleasedRangesCount++;
     ReleasedBytes += Size;
+    if (ActivePages)
+      ActivePages->clear(BaseAddress+From, BaseAddress+To);
   }
 
 private:
@@ -38,6 +40,7 @@ private:
   uptr ReleasedBytes = 0;
   uptr BaseAddress = 0;
   MapPlatformData *Data = nullptr;
+  ShadowBitMap *ActivePages = nullptr;
 };
 
 // A packed array of Counters. Each counter occupies 2^N bits, enough to store

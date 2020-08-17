@@ -383,8 +383,8 @@ public:
 
   inline bool backStopNeeded() {
     constexpr uptr MB = 1024*1024;
-    constexpr uptr BackStopThreshold = 5;
-    constexpr uptr BackStopLeeway = 5*MB;
+    constexpr uptr BackStopThreshold = 10;
+    constexpr uptr BackStopLeeway = 10*MB;
 
     return effectiveSize() > BackStopThreshold*getMaxSize() + BackStopLeeway;
   }
