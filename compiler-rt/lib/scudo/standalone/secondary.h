@@ -522,8 +522,7 @@ template <class CacheT> LargeBlock::SavedHeader MapAllocator<CacheT>::decommit(v
   Save.Data = H->Data;
 
   MapPlatformData Data = H->Data;
-  map((void*)Block, Save.BlockEnd - Block, "scudo:secondary:decommit", MAP_NOACCESS);
-  releasePagesToOS(Block, 0, Save.BlockEnd - Block, &Data);
+  map((void*)Block, Save.BlockEnd - Block, "scudo:secondary:decommit", MAP_NOACCESS, &Data);
   return Save;
 }
 
