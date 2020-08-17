@@ -100,8 +100,6 @@ public:
 
     if (SupportsMemoryTagging)
       UseMemoryTagging = systemSupportsMemoryTagging();
-
-    activePages.init(PrimaryBase, PrimarySize, PageSize);
   }
   void init(s32 ReleaseToOsInterval) {
     memset(this, 0, sizeof(*this));
@@ -171,18 +169,14 @@ public:
     }
   }
 
-  template <typename F> void iterateOverActivePages(F Callback) {
+  template <typename F> void iterateOverActiveMemory(F Callback) {
     for (uptr I = 0; I < NumClasses; I++) {
       if (I == SizeClassMap::BatchClassId)
         continue;
       const RegionInfo *Region = getRegionInfo(I);
       const uptr From = Region->RegionBeg;
-      const uptr To = From + Region->AllocatedUser;
-      const uptr PageSize = getPageSizeCached();
-      for (uptr Page = From; Page < To; Page += PageSize) {
-        if (activePages[Page])
-            Callback(Page);
-      }
+      const uptr Size = Region->AllocatedUser;
+      Callback(From, Size);
     }
   }
 
@@ -207,8 +201,14 @@ public:
       getStats(Str, I, 0);
   }
 
-  uptr getTotalActiveUser() {
-    return (uptr)Max<s32>(atomic_load_relaxed(&ActiveUserBytes), 0);
+  uptr getTotalAllocatedUser() {
+    uptr Result = 0;
+    for (uptr I = 0; I != NumClasses; ++I) {
+      if (I == SizeClassMap::BatchClassId)
+        continue;
+      Result += RegionInfoArray[I].AllocatedUser;
+    }
+    return Result;
   }
 
   void setReleaseToOsIntervalMs(s32 Interval) {
@@ -228,15 +228,6 @@ public:
       TotalReleasedBytes += releaseToOSMaybe(Region, I, /*Force=*/true);
     }
     return TotalReleasedBytes;
-  }
-
-  void activatePage(uptr page) {
-    if (!activePages[page]) {
-      // TODO(marton) TOCTOU; not a massive problem as ActiveUserBytes is only advisory...
-      activePages.set(page);
-      const s32 PageSize = (s32)getPageSizeCached();
-      atomic_fetch_add(&ActiveUserBytes, PageSize, memory_order_relaxed);
-    }
   }
 
   bool useMemoryTagging() const {
@@ -342,8 +333,6 @@ private:
   atomic_s32 ReleaseToOsIntervalMs;
   bool UseMemoryTagging;
   alignas(SCUDO_CACHE_LINE_SIZE) RegionInfo RegionInfoArray[NumClasses];
-  alignas(SCUDO_CACHE_LINE_SIZE) ShadowBitMap activePages;
-  atomic_s32 ActiveUserBytes; // TODO(marton) signed because of TOCTTOU & possible underflow
 
   RegionInfo *getRegionInfo(uptr ClassId) {
     DCHECK_LT(ClassId, NumClasses);
@@ -507,10 +496,9 @@ private:
       }
     }
 
-    ReleaseRecorder Recorder(Region->RegionBeg, &activePages, &Region->Data);
+    ReleaseRecorder Recorder(Region->RegionBeg, &Region->Data);
     releaseFreeMemoryToOS(Region->FreeList, Region->RegionBeg,
                           Region->AllocatedUser, BlockSize, &Recorder);
-    atomic_fetch_sub(&ActiveUserBytes, (s32)Recorder.getReleasedBytes(), memory_order_relaxed);
 
     if (Recorder.getReleasedRangesCount() > 0) {
       Region->ReleaseInfo.PushedBlocksAtLastRelease =
