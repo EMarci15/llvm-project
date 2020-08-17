@@ -304,9 +304,9 @@ public:
   typedef ShadowBitMap ShadowT;
 
   static constexpr uptr SweepThreshold
-                          = /* Sweep when */25/* % of all allocated memory is in quarantine...*/;
+                          = /* Sweep when */15/* % of all allocated memory is in quarantine...*/;
   static constexpr uptr DecommitThreshold
-                          = /* ...or decommitted memory size */900/* % of allocated memory. */;
+                          = /* ...or decommitted memory size */100/* % of allocated memory. */;
   static constexpr bool IgnoreFailedFreeSize = true;
   static constexpr uptr SmallGranuleSize = 8/* Bytes */;
 
@@ -372,7 +372,10 @@ public:
 
   inline uptr effectiveSize() {
     uptr FailedFrees = IgnoreFailedFreeSize*atomic_load_relaxed(&FailedFreeSize);
-    return Cache.getSize() - FailedFrees;
+    uptr CacheSize = Cache.getSize();
+    if (CacheSize < FailedFrees)
+      return 0; // FailedFree is out of date; do not wait/trigger sweep
+    return CacheSize - FailedFrees;
   }
 
   inline bool sweepNeeded() {
@@ -383,8 +386,8 @@ public:
 
   inline bool backStopNeeded() {
     constexpr uptr MB = 1024*1024;
-    constexpr uptr BackStopThreshold = 10;
-    constexpr uptr BackStopLeeway = 10*MB;
+    constexpr uptr BackStopThreshold = 5;
+    constexpr uptr BackStopLeeway = 100*MB;
 
     return effectiveSize() > BackStopThreshold*getMaxSize() + BackStopLeeway;
   }
@@ -480,6 +483,7 @@ private:
 
   void NOINLINE doSweepAndRecycle() {
     CacheT ToCheck = gatherContents();
+    atomic_store_relaxed(&FailedFreeSize, 0);
     
     AddrLimits SmallLimits = ToCheck.SmallCache.addrLimits();
     AddrLimits LargeLimits = ToCheck.LargeCache.addrLimits();
@@ -488,8 +492,8 @@ private:
     CacheT FailedFrees;
     FailedFrees.init();
     recycleUnmarked(FailedFrees, ToCheck);
-    atomic_store_relaxed(&FailedFreeSize, FailedFrees.getSize());
     Cache.transfer(&FailedFrees); // Reinsert failed frees
+    atomic_store_relaxed(&FailedFreeSize, FailedFrees.getSize());
     SmallShadowMap.clear();
     LargeShadowMap.clear();
 
