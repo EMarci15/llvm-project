@@ -9,7 +9,6 @@
 #ifndef SCUDO_BITVECTOR_H_
 #define SCUDO_BITVECTOR_H_
 
-#include "atomic_helpers.h"
 #include "common.h"
 #include "mutex.h"
 
@@ -24,8 +23,7 @@ private:
   }
 
 public:
-  using mapT = atomic_u64;
-  using mapValT = mapT::Type;
+  using mapT = u64;
   const static uptr BITS_PER_ENTRY = sizeof(mapT)*8;
   const uptr ENTRIES_PER_PAGE = getPageSizeSlow()/sizeof(mapT);
 
@@ -39,12 +37,12 @@ public:
 
   void set(uptr Index) {
     DCHECK_LT(Index, Size);
-    atomic_or_fetch(arrayEntry(Index), subMask(Index));
+    arrayEntry(Index) |= subMask(Index);
   }
 
   void clear(uptr Index) {
     DCHECK_LT(Index, Size);
-    atomic_and_fetch(arrayEntry(Index), ~subMask(Index));
+    arrayEntry(Index) |= ~subMask(Index);
   }
 
   void clear() {
@@ -52,30 +50,30 @@ public:
   }
 
   void clear(uptr From, uptr To) {
-    const mapValT startMask = ~(subMask(From)-1); // 1s at & above subIndex(From)
-    const mapValT endMask = ((subMask(To)<<1)-1); // 1s at & below subIndex(To)
+    const mapT startMask = ~(subMask(From)-1); // 1s at & above subIndex(From)
+    const mapT endMask = ((subMask(To)<<1)-1); // 1s at & below subIndex(To)
 
     const uptr startIndex = arrIndex(From);
     const uptr endIndex = arrIndex(To);
 
     if (startIndex == endIndex) {
-      mapValT mask = startMask & endMask; // single entry -- 1s from From to To
-      atomic_and_fetch(&Map[startIndex], ~mask);
+      mapT mask = startMask & endMask; // single entry -- 1s from From to To
+      Map[startIndex] |= ~mask;
       return;
     } else {
       // Zero start and end
-      atomic_and_fetch(&Map[startIndex], ~startMask);
-      atomic_and_fetch(&Map[endIndex], ~endMask);
+      Map[startIndex] &= ~startMask;
+      Map[endIndex] &= ~endMask;
 
       // Zero partial pages at start and end
       const uptr firstFullPage = roundUpTo(startIndex+1, ENTRIES_PER_PAGE);
       const uptr lastFullPage = roundDownTo(endIndex, ENTRIES_PER_PAGE);
       for (uptr index = startIndex+1; (index < firstFullPage) && (index < endIndex); index++) {
-        atomic_store_relaxed(&Map[index], 0);
+        Map[index] = 0;
       }
       if (firstFullPage <= lastFullPage) {
         for (uptr index = lastFullPage; index < endIndex; index++) {
-          atomic_store_relaxed(&Map[index], 0);
+          Map[index] = 0;
         }
       }
 
@@ -88,28 +86,28 @@ public:
 
   bool operator[](uptr Index) {
     DCHECK_LT(Index, Size);
-    return atomic_load_relaxed(arrayEntry(Index)) & subMask(Index);
+    return arrayEntry(Index) & subMask(Index);
   }
 
   bool allZero(uptr From, uptr To) {
-    mapValT startMask = ~(subMask(From)-1); // 1s at & above subIndex(From)
-    mapValT endMask = ((subMask(To)<<1)-1); // 1s at & below subIndex(To)
+    mapT startMask = ~(subMask(From)-1); // 1s at & above subIndex(From)
+    mapT endMask = ((subMask(To)<<1)-1); // 1s at & below subIndex(To)
 
     uptr startIndex = arrIndex(From);
     uptr endIndex = arrIndex(To);
 
     if (startIndex == endIndex) {
-      mapValT mask = startMask & endMask; // single entry -- 1s from From to To
-      return (atomic_load_relaxed(&Map[startIndex]) & mask)==0;
+      mapT mask = startMask & endMask; // single entry -- 1s from From to To
+      return (Map[startIndex] & mask)==0;
     } else {
       // Check start and end
-      bool startNotAllZero = atomic_load_relaxed(&Map[startIndex]) & startMask;
-      bool endNotAllZero = atomic_load_relaxed(&Map[endIndex]) & endMask;
+      bool startNotAllZero = Map[startIndex] & startMask;
+      bool endNotAllZero = Map[endIndex] & endMask;
       if (startNotAllZero || endNotAllZero) return false;
 
       // Check middle
       for (uptr index = startIndex+1; index < endIndex; index++) {
-        if (atomic_load_relaxed(&Map[index])) return false;
+        if (Map[index]) return false;
       }
       return true;
     }
@@ -125,8 +123,8 @@ private:
   inline uptr arrIndex(uptr Index) const { return Index / BITS_PER_ENTRY; }
   inline uptr subIndex(uptr Index) const { return Index % BITS_PER_ENTRY; }
 
-  inline mapT* arrayEntry(uptr Index) const { return &Map[arrIndex(Index)]; }
-  inline mapValT subMask(uptr Index) const { return ((mapValT)1) << subIndex(Index); }
+  inline mapT& arrayEntry(uptr Index) const { return Map[arrIndex(Index)]; }
+  inline mapT subMask(uptr Index) const { return ((mapT)1) << subIndex(Index); }
 };
 
 // A class recording a boolean for each block of memory (of size BlockSize),
