@@ -304,11 +304,11 @@ public:
   typedef ShadowBitMap ShadowT;
 
   static constexpr uptr SweepThreshold
-                          = /* Sweep when */15/* % of all allocated memory is in quarantine...*/;
+                          = /* Sweep when */25/* % of all allocated memory is in quarantine...*/;
   static constexpr uptr DecommitThreshold
-                          = /* ...or decommitted memory size */100/* % of allocated memory. */;
+                          = /* ...or decommitted memory size */300/* % of allocated memory. */;
   static constexpr bool IgnoreFailedFreeSize = true;
-  static constexpr uptr SmallGranuleSize = 8/* Bytes */;
+  static constexpr uptr SmallGranuleSizeLog = 5; // 32B
 
   void initLinkerInitialized(uptr CacheSize) {
     atomic_store_relaxed(&MaxCacheSize, CacheSize);
@@ -409,9 +409,11 @@ public:
 
   // Point of entry for SweeperThread
   void sweeperThreadMain() {
+    uptr PageSizeLog = getLog2(getPageSizeCached());
+
     AddrLimits PrimaryLimits = Allocator->primaryLimits();
-    SmallShadowMap.init(PrimaryLimits.MinAddr, PrimaryLimits.size(), SmallGranuleSize);
-    LargeShadowMap.init(MIN_HEAP_ADDR, MAX_HEAP_ADDR - MIN_HEAP_ADDR, getPageSizeCached());
+    SmallShadowMap.init(PrimaryLimits.MinAddr, PrimaryLimits.size(), SmallGranuleSizeLog);
+    LargeShadowMap.init(MIN_HEAP_ADDR, MAX_HEAP_ADDR - MIN_HEAP_ADDR, PageSizeLog);
 
     // Repeat until program exit
     while (true) {

@@ -89,7 +89,7 @@ public:
       // limit is mostly arbitrary and based on empirical observations.
       // TODO(kostyak): make the lower limit a runtime option
       Region->CanRelease = (I != SizeClassMap::BatchClassId) &&
-                           (getSizeByClassId(I) >= (PageSize / 8));
+                           (getSizeByClassId(I) >= (PageSize / 4));
     }
 
     if (SupportsMemoryTagging)
@@ -469,25 +469,26 @@ private:
     const uptr BlockSize = getSizeByClassId(ClassId);
     const uptr PageSize = getPageSizeCached();
 
-    const uptr BytesPushedThreshold = 100*PageSize;
-    const uptr FreeListSizeThreshold = 200*PageSize;
+    const uptr BytesPushedThreshold = 4096*PageSize;
+    const uptr FreeListSizeThreshold = 4096*PageSize;
 
     CHECK_GE(Region->Stats.PoppedBlocks, Region->Stats.PushedBlocks);
     const uptr BytesInFreeList =
         Region->AllocatedUser -
         (Region->Stats.PoppedBlocks - Region->Stats.PushedBlocks) * BlockSize;
-    if (BytesInFreeList < PageSize)
-      return 0; // No chance to release anything.
     const uptr BytesPushed = (Region->Stats.PushedBlocks -
                               Region->ReleaseInfo.PushedBlocksAtLastRelease) *
                              BlockSize;
-    if (BytesPushed < PageSize)
-      return 0; // Nothing new to release.
 
     if (!Force) {
       if ((BytesInFreeList < FreeListSizeThreshold)
             | (BytesPushed < BytesPushedThreshold))
         return 0; // Not enough memory to release to justify the scan.
+    } else {
+      if (BytesInFreeList < PageSize)
+        return 0; // No chance to release anything.
+      if (BytesPushed < PageSize)
+        return 0; // Nothing new to release.
     }
 
     ReleaseRecorder Recorder(Region->RegionBeg, &activePages, &Region->Data);

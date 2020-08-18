@@ -131,11 +131,11 @@ private:
 // in the address range [Start,Start+MemSize)
 class ShadowBitMap : private BitVector {
 public:
-  void init(uptr Start, uptr MemSize, uptr BlockSize) {
+  void init(uptr Start, uptr MemSize, uptr BlockSizeLog) {
     this->Start = Start;
     this->MemSize = MemSize;
-    this->BlockSize = BlockSize; 
-    BitVector::init(divRoundUp(MemSize, BlockSize));
+    this->BlockSizeLog = BlockSizeLog;
+    BitVector::init(divRoundUp(MemSize, ((uptr)1)<<BlockSizeLog));
  }
 
   void set(uptr Ptr) {
@@ -164,7 +164,7 @@ public:
   bool allZero(uptr From, uptr To) {
     dcheck_valid(From);
     dcheck_valid(To);
-    To = roundUpTo(To, BlockSize);
+    To = roundUpTo(To, ((uptr)1) << BlockSizeLog);
     return BitVector::allZero(index(From), index(To)-1);
   }
 
@@ -172,10 +172,10 @@ public:
   void enable() {}
 
 private:
-  uptr Start, MemSize, BlockSize;
+  uptr Start, MemSize, BlockSizeLog;
 
   uptr index(uptr ptr) {
-    return (ptr - Start) / BlockSize;
+    return (ptr - Start) >> BlockSizeLog;
   }
 
   inline void dcheck_valid(uptr Ptr) {
