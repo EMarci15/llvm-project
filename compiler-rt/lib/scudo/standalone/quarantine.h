@@ -495,6 +495,8 @@ private:
     CacheT FailedFrees;
     FailedFrees.init();
     recycleUnmarked(FailedFrees, ToCheck);
+    Allocator->postSweepCleanup();
+
     Cache.transfer(&FailedFrees); // Reinsert failed frees
     atomic_store_relaxed(&FailedFreeSize, FailedFrees.getSize());
     SmallShadowMap.clear();

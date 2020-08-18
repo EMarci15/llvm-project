@@ -108,6 +108,7 @@ template <class SizeClassAllocator> struct SizeClassAllocatorLocalCache {
       while (C->Count > 0)
         drain(C, I);
     }
+    Allocator->releaseToOS();
   }
 
   TransferBatch *createBatch(uptr ClassId, void *B) {
