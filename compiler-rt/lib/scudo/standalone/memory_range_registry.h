@@ -75,10 +75,7 @@ private:
     DCHECK_GT(RangeCount, 0);
   }
 
-  void registerMapRanges();
-};
-
-void MemoryRangeRegistry::registerMapRanges() {
+  void registerMapRanges() {
     ScopedLock L(Mutex);
     int fmaps = open("/proc/self/maps", O_RDONLY);
     CHECK(fmaps >= 0);
@@ -127,7 +124,9 @@ void MemoryRangeRegistry::registerMapRanges() {
     }
 
     close(fmaps);
-}
+  }
+};
+
 
 } // namespace scudo
 
