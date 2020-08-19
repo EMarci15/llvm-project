@@ -89,7 +89,7 @@ public:
 
     Stats.initLinkerInitialized();
     const s32 ReleaseToOsIntervalMs = getFlags()->release_to_os_interval_ms;
-    Primary.initLinkerInitialized();
+    Primary.initLinkerInitialized(ReleaseToOsIntervalMs);
     Secondary.initLinkerInitialized(&Stats, ReleaseToOsIntervalMs);
 
     Quarantine.init(this, static_cast<uptr>(getFlags()->thread_local_quarantine_size_kb << 10));
@@ -658,6 +658,7 @@ public:
 
   bool setOption(Option O, sptr Value) {
     if (O == Option::ReleaseInterval) {
+      Primary.setReleaseToOsIntervalMs(static_cast<s32>(Value));
       Secondary.setReleaseToOsIntervalMs(static_cast<s32>(Value));
       return true;
     }

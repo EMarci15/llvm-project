@@ -40,7 +40,7 @@ struct AndroidConfig {
   using SizeClassMap = AndroidSizeClassMap;
 #if SCUDO_CAN_USE_PRIMARY64
   // 256MB regions
-  typedef SizeClassAllocator64<SizeClassMap, 28U,
+  typedef SizeClassAllocator64<SizeClassMap, 28U, 1000, 1000,
                                /*MaySupportMemoryTagging=*/true>
       Primary;
 #else
@@ -57,7 +57,7 @@ struct AndroidSvelteConfig {
   using SizeClassMap = SvelteSizeClassMap;
 #if SCUDO_CAN_USE_PRIMARY64
   // 128MB regions
-  typedef SizeClassAllocator64<SizeClassMap, 27U> Primary;
+  typedef SizeClassAllocator64<SizeClassMap, 27U, 1000, 1000> Primary;
 #else
   // 64KB regions
   typedef SizeClassAllocator32<SizeClassMap, 16U, 1000, 1000> Primary;

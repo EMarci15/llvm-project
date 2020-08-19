@@ -41,12 +41,15 @@ namespace scudo {
 // released if the platform allows for it.
 
 template <class SizeClassMapT, uptr RegionSizeLog,
+          s32 MinReleaseToOsIntervalMs = INT32_MIN,
+          s32 MaxReleaseToOsIntervalMs = INT32_MAX,
           bool MaySupportMemoryTagging = false>
 class SizeClassAllocator64 {
 public:
   typedef SizeClassMapT SizeClassMap;
   typedef SizeClassAllocator64<
-      SizeClassMap, RegionSizeLog, MaySupportMemoryTagging>
+      SizeClassMap, RegionSizeLog, MinReleaseToOsIntervalMs,
+      MaxReleaseToOsIntervalMs, MaySupportMemoryTagging>
       ThisT;
   typedef SizeClassAllocatorLocalCache<ThisT> CacheT;
   typedef typename CacheT::TransferBatch TransferBatch;
@@ -65,7 +68,7 @@ public:
     return AddrLimits(PrimaryBase, PrimaryBase+PrimarySize);
   }
 
-  void initLinkerInitialized() {
+  void initLinkerInitialized(s32 ReleaseToOsInterval) {
     // Reserve the space required for the Primary.
     PrimaryBase = reinterpret_cast<uptr>(
         map(nullptr, PrimarySize, "scudo:primary", MAP_NOACCESS, &Data));
@@ -90,16 +93,19 @@ public:
       // TODO(kostyak): make the lower limit a runtime option
       Region->CanRelease = (I != SizeClassMap::BatchClassId) &&
                            (getSizeByClassId(I) >= (PageSize / 4));
+      if (Region->CanRelease)
+        Region->ReleaseInfo.LastReleaseAtNs = Time;
     }
+    setReleaseToOsIntervalMs(ReleaseToOsInterval);
 
     if (SupportsMemoryTagging)
       UseMemoryTagging = systemSupportsMemoryTagging();
 
     activePages.init(PrimaryBase, PrimarySize, PageSize);
   }
-  void init() {
+  void init(s32 ReleaseToOsInterval) {
     memset(this, 0, sizeof(*this));
-    initLinkerInitialized();
+    initLinkerInitialized(ReleaseToOsInterval);
   }
 
   void unmapTestOnly() {
@@ -212,6 +218,15 @@ public:
     return atomic_load_relaxed(&TotalActiveUser);
   }
 
+  void setReleaseToOsIntervalMs(s32 Interval) {
+    if (Interval >= MaxReleaseToOsIntervalMs) {
+      Interval = MaxReleaseToOsIntervalMs;
+    } else if (Interval <= MinReleaseToOsIntervalMs) {
+      Interval = MinReleaseToOsIntervalMs;
+    }
+    atomic_store(&ReleaseToOsIntervalMs, Interval, memory_order_relaxed);
+  }
+
   uptr releaseToOS() {
     uptr TotalReleasedBytes = 0;
     for (uptr I = 0; I < NumClasses; I++) {
@@ -306,6 +321,7 @@ private:
     uptr ActiveAtLastRelease;
     uptr RangesReleased;
     uptr LastReleasedBytes;
+    u64 LastReleaseAtNs;
   };
 
   struct UnpaddedRegionInfo {
@@ -329,6 +345,7 @@ private:
 
   uptr PrimaryBase;
   MapPlatformData Data;
+  atomic_s32 ReleaseToOsIntervalMs;
   bool UseMemoryTagging;
   alignas(SCUDO_CACHE_LINE_SIZE) RegionInfo RegionInfoArray[NumClasses];
   alignas(SCUDO_CACHE_LINE_SIZE) ShadowBitMap activePages;
@@ -464,13 +481,14 @@ private:
                 getRegionBaseByClassId(ClassId));
   }
 
+  s32 getReleaseToOsIntervalMs() {
+    return atomic_load(&ReleaseToOsIntervalMs, memory_order_relaxed);
+  }
+
   NOINLINE uptr releaseToOSMaybe(RegionInfo *Region, uptr ClassId,
                                  bool Force = false) {
     const uptr BlockSize = getSizeByClassId(ClassId);
     const uptr PageSize = getPageSizeCached();
-
-    const uptr BytesPushedThreshold = 4096*PageSize;
-    const uptr FreeListSizeThreshold = 4096*PageSize;
 
     CHECK_GE(Region->Stats.PoppedBlocks, Region->Stats.PushedBlocks);
     const uptr BytesInFreeList =
@@ -481,15 +499,20 @@ private:
                              BlockSize;
 
     if (!Force) {
-      if ((BytesInFreeList < FreeListSizeThreshold)
-            | (BytesPushed < BytesPushedThreshold))
-        return 0; // Not enough memory to release to justify the scan.
-    } else {
-      if (BytesInFreeList < PageSize)
-        return 0; // No chance to release anything.
-      if (BytesPushed < PageSize)
-        return 0; // Nothing new to release.
+      const s32 IntervalMs = getReleaseToOsIntervalMs();
+      if (IntervalMs < 0)
+        return 0;
+      if (Region->ReleaseInfo.LastReleaseAtNs +
+              static_cast<u64>(IntervalMs) * 1000000 >
+          getMonotonicTime()) {
+        return 0; // Memory was returned recently.
+      }
     }
+      
+    if (BytesInFreeList < PageSize)
+      return 0; // No chance to release anything.
+    if (BytesPushed < PageSize)
+      return 0; // Nothing new to release.
 
     ReleaseRecorder Recorder(Region->RegionBeg, &activePages, &Region->Data);
     releaseFreeMemoryToOS(Region->FreeList, Region->RegionBeg,
@@ -502,6 +525,7 @@ private:
     Region->ReleaseInfo.PushedBlocksAtLastRelease =
           Region->Stats.PushedBlocks;
     Region->ReleaseInfo.RangesReleased += Recorder.getReleasedRangesCount();
+    Region->ReleaseInfo.LastReleaseAtNs = getMonotonicTime();
     
     // Change may be < 0, but TotalActiveUser >= 0; rely on unsigned overflow
     uptr ActiveChange = CurrentActive - LastActive;
