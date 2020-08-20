@@ -238,10 +238,14 @@ public:
     return TotalReleasedBytes;
   }
 
-  void activatePage(uptr page) {
-    if (!activePages[page]) {
-      activePages.set(page);
-    }
+  void activatePage(uptr page, uptr ClassId) {
+    ScopedLock L(getRegionInfo(ClassId)->Mutex);
+    activePages.set(page);
+  }
+
+  void deactivatePage(uptr Ptr, uptr ClassId) {
+    ScopedLock L(getRegionInfo(ClassId)->Mutex);
+    activePages.clear(Ptr);
   }
 
   bool useMemoryTagging() const {

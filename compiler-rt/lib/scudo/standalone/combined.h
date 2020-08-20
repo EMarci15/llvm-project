@@ -893,6 +893,8 @@ private:
   static const sptr MemTagDeallocationTidIndex = 1;
   static const sptr MemTagPrevTagIndex = 2;
 
+  static const uptr ReleaseMinSize = 4096 * 3;
+
   static const uptr MaxTraceSize = 64;
 
   GlobalStats Stats;
@@ -1016,10 +1018,24 @@ private:
         Alloc.Ptr = Ptr;
         Alloc.Size = Size;
 
-        // Wipe contents
-        FillContentsMode FillContents =
-          (Options.FillContents == NoFill) ? ZeroFill : Options.FillContents;
-        memset(Ptr, FillContents == ZeroFill ? 0 : PatternFillByte, Size);
+        if (Size >= ReleaseMinSize) {
+          // Release full pages after the start of the actual chunk
+          const uptr PageSize = getPageSizeCached();
+          const uptr BlockEnd = (uptr)BlockBegin +
+                                    SizeClassMap::getSizeByClassId(ClassId);
+          const uptr ReleaseStart = roundUpTo((uptr)Ptr, PageSize);
+          const uptr ReleaseSize = roundDownTo(BlockEnd-ReleaseStart, PageSize);
+
+          Primary.deactivatePage((uptr)BlockBegin, ClassId);
+          releasePagesToOS(ReleaseStart, 0, ReleaseSize);
+          if (LIKELY(ReleaseStart > (uptr)Ptr))
+            memset(Ptr, 0, ReleaseStart - (uptr)Ptr);
+        } else {
+          // Wipe contents
+          FillContentsMode FillContents =
+            (Options.FillContents == NoFill) ? ZeroFill : Options.FillContents;
+          memset(Ptr, FillContents == ZeroFill ? 0 : PatternFillByte, Size);
+        }
 
         Quarantine.put(&TSD->QuarantineCache, Alloc, &UnlockRequired, TSD);
       } else {
