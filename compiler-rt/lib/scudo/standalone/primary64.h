@@ -227,12 +227,12 @@ public:
     atomic_store(&ReleaseToOsIntervalMs, Interval, memory_order_relaxed);
   }
 
-  uptr releaseToOS() {
+  uptr releaseToOS(bool Force = true) {
     uptr TotalReleasedBytes = 0;
     for (uptr I = 0; I < NumClasses; I++) {
       RegionInfo *Region = getRegionInfo(I);
       ScopedLock L(Region->Mutex);
-      TotalReleasedBytes += releaseToOSMaybe(Region, I, /*Force=*/true);
+      TotalReleasedBytes += releaseToOSMaybe(Region, I, Force);
     }
 
     return TotalReleasedBytes;
@@ -318,6 +318,7 @@ private:
 
   struct ReleaseToOsInfo {
     uptr PushedBlocksAtLastRelease;
+    uptr BytesInFreeListAtLastRelease;
     uptr ActiveAtLastRelease;
     uptr RangesReleased;
     uptr LastReleasedBytes;
@@ -502,13 +503,26 @@ private:
       const s32 IntervalMs = getReleaseToOsIntervalMs();
       if (IntervalMs < 0)
         return 0;
-      if (Region->ReleaseInfo.LastReleaseAtNs +
-              static_cast<u64>(IntervalMs) * 1000000 >
-          getMonotonicTime()) {
-        return 0; // Memory was returned recently.
-      }
-    }
+      const u64 ReleaseInterval = static_cast<u64>(IntervalMs) * 1000000;
+      const u64 ComprehensiveReleaseInterval = 10 * ReleaseInterval;
+      const u64 Time = getMonotonicTime();
+      const u64 ReleaseTime = Region->ReleaseInfo.LastReleaseAtNs;
       
+      if (ReleaseTime + ReleaseInterval > Time)
+        return 0;
+      if (ReleaseTime + ComprehensiveReleaseInterval < Time) {
+        // Release only if increase is large
+        const s64 FreeListBytesIncrease =
+            (s64)BytesInFreeList -
+                (s64)Region->ReleaseInfo.BytesInFreeListAtLastRelease;
+        const s64 FreeListIncreaseThreshold = 50; /* percent */
+
+        if (FreeListBytesIncrease * 100 <
+              (s64)BytesInFreeList * FreeListIncreaseThreshold)
+          return 0;
+      } // Otherwise, enough time has passed, so do release
+    }
+
     if (BytesInFreeList < PageSize)
       return 0; // No chance to release anything.
     if (BytesPushed < PageSize)
@@ -524,6 +538,7 @@ private:
     Region->ReleaseInfo.ActiveAtLastRelease = CurrentActive;
     Region->ReleaseInfo.PushedBlocksAtLastRelease =
           Region->Stats.PushedBlocks;
+    Region->ReleaseInfo.BytesInFreeListAtLastRelease = BytesInFreeList;
     Region->ReleaseInfo.RangesReleased += Recorder.getReleasedRangesCount();
     Region->ReleaseInfo.LastReleaseAtNs = getMonotonicTime();
     
