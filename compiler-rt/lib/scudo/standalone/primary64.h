@@ -78,6 +78,7 @@ public:
     if (UNLIKELY(!getRandom(reinterpret_cast<void *>(&Seed), sizeof(Seed))))
       Seed = static_cast<u32>(Time ^ (PrimaryBase >> 12));
     const uptr PageSize = getPageSizeCached();
+    const uptr PageSizeLog = getLog2(PageSize);
     for (uptr I = 0; I < NumClasses; I++) {
       RegionInfo *Region = getRegionInfo(I);
       // The actual start of a region is offseted by a random number of pages.
@@ -101,7 +102,7 @@ public:
     if (SupportsMemoryTagging)
       UseMemoryTagging = systemSupportsMemoryTagging();
 
-    activePages.init(PrimaryBase, PrimarySize, PageSize);
+    activePages.init(PrimaryBase, PrimarySize, PageSizeLog);
   }
   void init(s32 ReleaseToOsInterval) {
     memset(this, 0, sizeof(*this));
