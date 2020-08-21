@@ -63,13 +63,10 @@ class FixedSizeClassMap : public SizeClassMapBase<Config> {
   static const uptr MidClass = MidSize / MinSize;
   static const u8 S = Config::NumBits - 1;
   static const uptr M = (1UL << S) - 1;
-
-  static const uptr SizeDelta = Chunk::getHeaderSize();
-
 public:
   static const u32 MaxNumCachedHint = Config::MaxNumCachedHint;
 
-  static const uptr MaxSize = (1UL << Config::MaxSizeLog) + SizeDelta;
+  static const uptr MaxSize = (1UL << Config::MaxSizeLog);
   static const uptr NumClasses =
       MidClass + ((Config::MaxSizeLog - Config::MidSizeLog) << S) + 1;
   static_assert(NumClasses <= 256, "");
@@ -79,16 +76,15 @@ public:
   static uptr getSizeByClassId(uptr ClassId) {
     DCHECK_NE(ClassId, BatchClassId);
     if (ClassId <= MidClass)
-      return (ClassId << Config::MinSizeLog) + SizeDelta;
+      return (ClassId << Config::MinSizeLog);
     ClassId -= MidClass;
     const uptr T = MidSize << (ClassId >> S);
-    return T + (T >> S) * (ClassId & M) + SizeDelta;
+    return T + (T >> S) * (ClassId & M);
   }
 
   static uptr getClassIdBySize(uptr Size) {
-    if (Size <= SizeDelta + (1 << Config::MinSizeLog))
+    if (Size <= (1 << Config::MinSizeLog))
       return 1;
-    Size -= SizeDelta;
     DCHECK_LE(Size, MaxSize);
     if (Size <= MidSize)
       return (Size + MinSize - 1) >> Config::MinSizeLog;

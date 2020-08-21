@@ -305,6 +305,8 @@ public:
     return B;
   }
 
+  static const uptr ImmediateReleaseMinSize = 4096 * 4;
+
 private:
   static const uptr RegionSize = 1UL << RegionSizeLog;
   static const uptr NumClasses = SizeClassMap::NumClasses;
@@ -507,24 +509,13 @@ private:
       const s32 IntervalMs = getReleaseToOsIntervalMs();
       if (IntervalMs < 0)
         return 0;
-      const u64 ReleaseInterval = static_cast<u64>(IntervalMs) * 1000000;
-      const u64 ComprehensiveReleaseInterval = 10 * ReleaseInterval;
-      const u64 Time = getMonotonicTime();
+      const u64 M = BlockSize >= ImmediateReleaseMinSize ? 10 : 1;
+      const u64 ReleaseInterval = static_cast<u64>(IntervalMs) * 1000000 * M;
       const u64 ReleaseTime = Region->ReleaseInfo.LastReleaseAtNs;
-      
+      const u64 Time = getMonotonicTime();
+
       if (ReleaseTime + ReleaseInterval > Time)
         return 0;
-      if (ReleaseTime + ComprehensiveReleaseInterval < Time) {
-        // Release only if increase is large
-        const s64 FreeListBytesIncrease =
-            (s64)BytesInFreeList -
-                (s64)Region->ReleaseInfo.BytesInFreeListAtLastRelease;
-        const s64 FreeListIncreaseThreshold = 50; /* percent */
-
-        if (FreeListBytesIncrease * 100 <
-              (s64)BytesInFreeList * FreeListIncreaseThreshold)
-          return 0;
-      } // Otherwise, enough time has passed, so do release
     }
 
     if (BytesInFreeList < PageSize)

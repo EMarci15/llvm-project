@@ -21,11 +21,11 @@
 namespace scudo {
 
 struct SavedSmallAlloc {
-  void *Ptr;
+  uptr Ptr;
   uptr Size;
 
-  uptr minAddress() const { return (uptr)Ptr; }
-  uptr maxAddress() const { return (uptr)Ptr+Size; }
+  uptr minAddress() const { return Ptr; }
+  uptr maxAddress() const { return Ptr+Size; }
 };
 
 template<typename T, u32 MaxCount>
@@ -513,7 +513,8 @@ private:
       uptr* const Begin = (uptr*) Ptr;
       uptr* const End = (uptr*) (Ptr + Size);
       for (uptr *Word = Begin; Word < End; Word++) {
-        uptr Target = *Word;
+        // Shift by header size to correctly associate end() pointers with the previous chunk
+        uptr Target = (*Word) - Chunk::getHeaderSize();
         // Only mark if Target is in the plausible range
         if (SmallLimits.contains(Target)) {
           SmallShadowMap.set(Target);
@@ -581,7 +582,7 @@ private:
     auto SmallFailureCb =
       [&FailedFrees](const SavedSmallAlloc& Item) -> void { FailedFrees.enqueueSmall(Item); };
     auto SmallSuccessCb = [this](const SavedSmallAlloc& Item) -> void {
-      Allocator->recycleChunk(reinterpret_cast<Node*>(Item.Ptr));
+      Allocator->recycleChunk(Item);
     };
     auto LargeFailureCb = [&FailedFrees](const LargeBlock::SavedHeader& Item) -> void {
       FailedFrees.enqueueLarge(Item);

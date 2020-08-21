@@ -506,25 +506,33 @@ public:
   // Chunk recycling function, returns a quarantined chunk to the backend,
   // first making sure it hasn't been tampered with.
   // Only called for primary, as secondary chunks are already decommitted.
-  void recycleChunk(void *Ptr) {
+  void recycleChunk(const SavedSmallAlloc& Alloc) {
     initThreadMaybe(/*MinimalInit=*/true);
 
-    Chunk::UnpackedHeader Header;
-    Chunk::loadHeader(Cookie, Ptr, &Header);
-    if (UNLIKELY(Header.State != Chunk::State::Quarantined))
-      reportInvalidChunkState(AllocatorAction::Recycling, Ptr);
+    const uptr Block = Alloc.Ptr;
+    const uptr Size = Alloc.Size;
+    uptr ClassId;
 
-    Chunk::UnpackedHeader NewHeader = Header;
-    NewHeader.State = Chunk::State::Available;
-    Chunk::compareExchangeHeader(Cookie, Ptr, &NewHeader, &Header);
+    if (Size < PrimaryT::ImmediateReleaseMinSize) {
+      Chunk::UnpackedHeader Header;
+      uptr Ptr;
+      loadHeaderFromBlock(Block, Ptr, &Header);
+      if (UNLIKELY(Header.State != Chunk::State::Quarantined))
+        reportInvalidChunkState(AllocatorAction::Recycling, (void*)Ptr);
 
-    void *BlockBegin = getBlockBegin(Ptr, &NewHeader);
-    const uptr ClassId = NewHeader.ClassId;
+      Chunk::UnpackedHeader NewHeader = Header;
+      NewHeader.State = Chunk::State::Available;
+      Chunk::compareExchangeHeader(Cookie, (void*)Ptr, &NewHeader, &Header);
+
+      ClassId = NewHeader.ClassId;
+    } else {
+      ClassId = SizeClassMap::getClassIdBySize(Size);
+    }
     DCHECK(ClassId);
 
     bool UnlockRequired;
     auto *TSD = TSDRegistry.getTSDAndLock(&UnlockRequired);
-    TSD->Cache.deallocate(ClassId, BlockBegin);
+    TSD->Cache.deallocate(ClassId, (void*)Block);
     if (UnlockRequired)
       TSD->unlock();
   }
@@ -893,8 +901,6 @@ private:
   static const sptr MemTagDeallocationTidIndex = 1;
   static const sptr MemTagPrevTagIndex = 2;
 
-  static const uptr ReleaseMinSize = 4096 * 3;
-
   static const uptr MaxTraceSize = 64;
 
   GlobalStats Stats;
@@ -1009,29 +1015,22 @@ private:
     } else {
       NewHeader.State = Chunk::State::Quarantined;
       Chunk::compareExchangeHeader(Cookie, Ptr, &NewHeader, Header);
-      void *BlockBegin = getBlockBegin(Ptr, &NewHeader);
+      uptr BlockBegin = reinterpret_cast<uptr>(getBlockBegin(Ptr, &NewHeader));
       const uptr ClassId = NewHeader.ClassId;
       bool UnlockRequired;
       auto *TSD = TSDRegistry.getTSDAndLock(&UnlockRequired);
       if (LIKELY(ClassId)) {
         SavedSmallAlloc Alloc;
-        Alloc.Ptr = Ptr;
-        Alloc.Size = Size;
+        Alloc.Ptr = BlockBegin;
+        Alloc.Size = SizeClassMap::getSizeByClassId(ClassId);
 
-        if (Size >= ReleaseMinSize) {
-          // Release full pages after the start of the actual chunk
-          const uptr PageSize = getPageSizeCached();
-          const uptr BlockEnd = (uptr)BlockBegin +
-                                    SizeClassMap::getSizeByClassId(ClassId);
-          const uptr ReleaseStart = roundUpTo((uptr)Ptr, PageSize);
-          const uptr ReleaseSize = roundDownTo(BlockEnd-ReleaseStart, PageSize);
-
-          Primary.deactivatePage((uptr)BlockBegin, ClassId);
-          releasePagesToOS(ReleaseStart, 0, ReleaseSize);
-          if (LIKELY(ReleaseStart > (uptr)Ptr))
-            memset(Ptr, 0, ReleaseStart - (uptr)Ptr);
+        if (Alloc.Size >= PrimaryT::ImmediateReleaseMinSize) {
+          // Unmap whole block
+          DCHECK(BlockBegin % 4096 == 0); DCHECK(Alloc.Size % 4096 == 0); 
+          Primary.deactivatePage(BlockBegin, ClassId);
+          releasePagesToOS(BlockBegin, 0, Alloc.Size);
         } else {
-          // Wipe contents
+          // Wipe contents of chunk
           FillContentsMode FillContents =
             (Options.FillContents == NoFill) ? ZeroFill : Options.FillContents;
           memset(Ptr, FillContents == ZeroFill ? 0 : PatternFillByte, Size);
@@ -1039,7 +1038,7 @@ private:
 
         Quarantine.put(&TSD->QuarantineCache, Alloc, &UnlockRequired, TSD);
       } else {
-        LargeBlock::SavedHeader SavedHeader = Secondary.decommit(BlockBegin);
+        LargeBlock::SavedHeader SavedHeader = Secondary.decommit((void*)BlockBegin);
         Quarantine.put(&TSD->QuarantineCache, SavedHeader, &UnlockRequired, TSD);
       }
       if (UnlockRequired)
@@ -1052,6 +1051,12 @@ private:
     *Chunk =
         Block + getChunkOffsetFromBlock(reinterpret_cast<const char *>(Block));
     return Chunk::isValid(Cookie, reinterpret_cast<void *>(*Chunk), Header);
+  }
+  
+  void loadHeaderFromBlock(uptr Block, uptr& Chunk, Chunk::UnpackedHeader *Header) {
+    Chunk =
+        Block + getChunkOffsetFromBlock(reinterpret_cast<const char *>(Block));
+    Chunk::loadHeader(Cookie, reinterpret_cast<void *>(Chunk), Header);
   }
 
   static uptr getChunkOffsetFromBlock(const char *Block) {
