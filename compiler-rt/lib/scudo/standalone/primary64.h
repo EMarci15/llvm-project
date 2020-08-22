@@ -15,6 +15,7 @@
 #include "list.h"
 #include "local_cache.h"
 #include "memtag.h"
+#include "minesweeper_config.h"
 #include "release.h"
 #include "stats.h"
 #include "string_utils.h"
@@ -305,8 +306,6 @@ public:
     }
     return B;
   }
-
-  static const uptr ImmediateReleaseMinSize = 4096 * 4;
 
 private:
   static const uptr RegionSize = 1UL << RegionSizeLog;

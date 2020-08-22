@@ -16,6 +16,7 @@
 #include "local_cache.h"
 #include "memory_range_registry.h"
 #include "memtag.h"
+#include "minesweeper_config.h"
 #include "quarantine.h"
 #include "report.h"
 #include "secondary.h"
@@ -513,7 +514,7 @@ public:
     const uptr Size = Alloc.Size;
     uptr ClassId;
 
-    if (Size < PrimaryT::ImmediateReleaseMinSize) {
+    if (Size < ImmediateReleaseMinSize) {
       Chunk::UnpackedHeader Header;
       uptr Ptr;
       loadHeaderFromBlock(Block, Ptr, &Header);
@@ -1024,7 +1025,7 @@ private:
         Alloc.Ptr = BlockBegin;
         Alloc.Size = SizeClassMap::getSizeByClassId(ClassId);
 
-        if (Alloc.Size >= PrimaryT::ImmediateReleaseMinSize) {
+        if (Alloc.Size >= ImmediateReleaseMinSize) {
           // Unmap whole block
           DCHECK(BlockBegin % 4096 == 0); DCHECK(Alloc.Size % 4096 == 0); 
           Primary.deactivatePage(BlockBegin, ClassId);

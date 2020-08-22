@@ -12,6 +12,7 @@
 #include "bitvector.h"
 #include "list.h"
 #include "mutex.h"
+#include "minesweeper_config.h"
 #include "secondary.h"
 #include "string_utils.h"
 #include "pool.h"
@@ -238,8 +239,6 @@ struct QuarantineCache {
   using SmallCacheT = SpecificQuarantineCache<SavedSmallAlloc, SmallBatchCount>;
   using LargeCacheT = SpecificQuarantineCache<LargeBlock::SavedHeader, LargeBatchCount>;
 
-  static constexpr bool IgnoreDecommitSize = true;
-
   SmallCacheT SmallCache;
   LargeCacheT LargeCache;
   using SmallBatchT = SmallCacheT::BatchT;
@@ -302,13 +301,6 @@ public:
   typedef QuarantineCache CacheT;
   typedef GlobalQuarantine<AllocatorT, Node> ThisT;
   typedef ShadowBitMap ShadowT;
-
-  static constexpr uptr SweepThreshold
-                          = /* Sweep when */25/* % of all allocated memory is in quarantine...*/;
-  static constexpr uptr DecommitThreshold
-                          = /* ...or decommitted memory size */300/* % of allocated memory. */;
-  static constexpr bool IgnoreFailedFreeSize = true;
-  static constexpr uptr SmallGranuleSizeLog = 5; // 32B
 
   void initLinkerInitialized(uptr CacheSize) {
     atomic_store_relaxed(&MaxCacheSize, CacheSize);
@@ -380,15 +372,11 @@ public:
 
   inline bool sweepNeeded() {
     return (effectiveSize() > getMaxSize())
-              || ((QuarantineCache::IgnoreDecommitSize)
+              || ((IgnoreDecommitSize)
                     && (Cache.LargeCache.getSize() > getMaxDecommitSize()));
   }
 
   inline bool backStopNeeded() {
-    constexpr uptr MB = 1024*1024;
-    constexpr uptr BackStopThreshold = 5;
-    constexpr uptr BackStopLeeway = 100*MB;
-
     return effectiveSize() > BackStopThreshold*getMaxSize() + BackStopLeeway;
   }
 
@@ -409,11 +397,7 @@ public:
 
   // Point of entry for SweeperThread
   void sweeperThreadMain() {
-    uptr PageSizeLog = getLog2(getPageSizeCached());
-
-    AddrLimits PrimaryLimits = Allocator->primaryLimits();
-    SmallShadowMap.init(PrimaryLimits.MinAddr, PrimaryLimits.size(), SmallGranuleSizeLog);
-    LargeShadowMap.init(MIN_HEAP_ADDR, MAX_HEAP_ADDR - MIN_HEAP_ADDR, PageSizeLog);
+    initSweeperStructures();
 
     // Repeat until program exit
     while (true) {
@@ -461,28 +445,54 @@ private:
     pthread_mutex_unlock(&SweeperMutex);
   }
 
+  void initSweeperStructures() {
+    uptr PageSizeLog = getLog2(getPageSizeCached());
+
+    AddrLimits PrimaryLimits = Allocator->primaryLimits();
+    SmallShadowMap.init(PrimaryLimits.MinAddr, PrimaryLimits.size(), SmallGranuleSizeLog);
+    LargeShadowMap.init(MIN_HEAP_ADDR, MAX_HEAP_ADDR - MIN_HEAP_ADDR, PageSizeLog);
+  }
+
   void recycle(bool* UnlockRequired, TSD<AllocatorT>* TSD) {
     if (LIKELY(TSD))
       Allocator->registerStack(TSD->StackRegistryIndex);
 
-    if (!pthread_mutex_trylock(&SweeperMutex)) {
-      // Launch thread here. We use late initialisation for this to avoid deadlock in init()
+    if (SingleThread) {
+      // Unlock -- sweep may re-acquire this lock
+      if (*UnlockRequired) {
+        *UnlockRequired = false;
+        TSD->unlock();
+      }
+
+      // Do sweeper initialisation in-thread
       if (UNLIKELY(!SweeperThreadLaunched)) {
         SweeperThreadLaunched = true;
-        pthread_create(&SweeperThread, nullptr, &sweeperThreadStart<ThisT>, this);
+        initSweeperStructures();
       }
 
-      pthread_cond_signal(&SweeperCondition);
-      
-      while (backStopNeeded()) {
-        if (*UnlockRequired) {
-          *UnlockRequired = false;
-          TSD->unlock();
+      // Perform sweep in-thread
+      doSweepAndRecycle();
+    } else {
+      // Sweeping offloaded; (create and) signal sweeper
+      if (!pthread_mutex_trylock(&SweeperMutex)) {
+        // Launch thread here. We use late initialisation for this to avoid deadlock in init()
+        if (UNLIKELY(!SweeperThreadLaunched)) {
+          SweeperThreadLaunched = true;
+          pthread_create(&SweeperThread, nullptr, &sweeperThreadStart<ThisT>, this);
         }
-        pthread_cond_wait(&BackStopCondition, &SweeperMutex);
-      }
 
-      pthread_mutex_unlock(&SweeperMutex);
+        pthread_cond_signal(&SweeperCondition);
+        
+        while (backStopNeeded()) {
+          if (*UnlockRequired) {
+            *UnlockRequired = false;
+            TSD->unlock();
+          }
+          pthread_cond_wait(&BackStopCondition, &SweeperMutex);
+        }
+
+        pthread_mutex_unlock(&SweeperMutex);
+      }
     }
   }
 
