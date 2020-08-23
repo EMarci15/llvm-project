@@ -1029,12 +1029,18 @@ private:
           // Unmap whole block
           DCHECK(BlockBegin % 4096 == 0); DCHECK(Alloc.Size % 4096 == 0); 
           Primary.deactivatePage(BlockBegin, ClassId);
-          releasePagesToOS(BlockBegin, 0, Alloc.Size);
+          if (MinesweeperUnmapping) {
+            releasePagesToOS(BlockBegin, 0, Alloc.Size);
+          } else if (MinesweeperZeroing) {
+            memset((void*)BlockBegin, 0, Alloc.Size);
+          }
         } else {
-          // Wipe contents of chunk
-          FillContentsMode FillContents =
-            (Options.FillContents == NoFill) ? ZeroFill : Options.FillContents;
-          memset(Ptr, FillContents == ZeroFill ? 0 : PatternFillByte, Size);
+          if (MinesweeperZeroing) {
+            // Wipe contents of chunk
+            FillContentsMode FillContents =
+              (Options.FillContents == NoFill) ? ZeroFill : Options.FillContents;
+            memset(Ptr, FillContents == ZeroFill ? 0 : PatternFillByte, Size);
+          }
         }
 
         Quarantine.put(&TSD->QuarantineCache, Alloc, &UnlockRequired, TSD);

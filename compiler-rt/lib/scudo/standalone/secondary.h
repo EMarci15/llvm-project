@@ -102,7 +102,7 @@ public:
     Entry.MapSize = H.MapSize;
     Entry.Data = H.Data;
     Entry.Time = 0; // Already released
-    Entry.NoAccess = true;
+    Entry.NoAccess = MinesweeperUnmapping;
 
     return store(Entry);
   }
@@ -522,7 +522,11 @@ template <class CacheT> LargeBlock::SavedHeader MapAllocator<CacheT>::decommit(v
   Save.Data = H->Data;
 
   MapPlatformData Data = H->Data;
-  map((void*)Block, Save.BlockEnd - Block, "scudo:secondary:decommit", MAP_NOACCESS, &Data);
+  if (MinesweeperUnmapping) {
+    map((void*)Block, Save.BlockEnd - Block, "scudo:secondary:decommit", MAP_NOACCESS, &Data);
+  } else if (MinesweeperZeroing) {
+    memset((void*)Block, 0, Save.BlockEnd - Block);
+  }
   return Save;
 }
 

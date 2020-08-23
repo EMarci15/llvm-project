@@ -62,6 +62,7 @@ set(SCUDO_HEADERS
   list.h
   local_cache.h
   memory_range_registry.h
+  minesweeper_config.h
   mutex.h
   platform.h
   pool.h
