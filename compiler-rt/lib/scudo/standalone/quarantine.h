@@ -502,7 +502,9 @@ private:
     
     AddrLimits SmallLimits = ToCheck.SmallCache.addrLimits();
     AddrLimits LargeLimits = ToCheck.LargeCache.addrLimits();
-    doSweepAndMark(SmallLimits, LargeLimits);
+    #ifndef NO_SWEEP
+      doSweepAndMark(SmallLimits, LargeLimits);
+    #endif
 
     CacheT FailedFrees;
     FailedFrees.init();
@@ -605,12 +607,17 @@ private:
         FailedFrees.enqueueLarge(Item);
       };
     #endif
-    auto SmallMarked = [this](uptr Ptr, uptr Size) -> bool {
-      return !SmallShadowMap.allZero(Ptr, Ptr+Size);
-    };
-    auto LargeMarked = [this](uptr Ptr, uptr Size) -> bool {
-      return !LargeShadowMap.allZero(Ptr, Ptr+Size);
-    };
+    #ifdef NO_SWEEP
+      auto SmallMarked = [this](uptr Ptr, uptr Size) -> bool { return false; };
+      auto LargeMarked = [this](uptr Ptr, uptr Size) -> bool { return false; };
+    #else
+      auto SmallMarked = [this](uptr Ptr, uptr Size) -> bool {
+        return !SmallShadowMap.allZero(Ptr, Ptr+Size);
+      };
+      auto LargeMarked = [this](uptr Ptr, uptr Size) -> bool {
+        return !LargeShadowMap.allZero(Ptr, Ptr+Size);
+      };
+    #endif
 
     checkUnmarked(ToCheck.SmallCache, SmallSuccessCb, SmallFailureCb, SmallMarked);
     checkUnmarked(ToCheck.LargeCache, LargeSuccessCb, LargeFailureCb, LargeMarked);
