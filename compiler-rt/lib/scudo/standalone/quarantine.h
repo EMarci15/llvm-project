@@ -589,17 +589,22 @@ private:
   }
 
   inline void recycleUnmarked(CacheT &FailedFrees, CacheT &ToCheck) {
-    auto SmallFailureCb =
-      [&FailedFrees](const SavedSmallAlloc& Item) -> void { FailedFrees.enqueueSmall(Item); };
     auto SmallSuccessCb = [this](const SavedSmallAlloc& Item) -> void {
       Allocator->recycleChunk(Item);
-    };
-    auto LargeFailureCb = [&FailedFrees](const LargeBlock::SavedHeader& Item) -> void {
-      FailedFrees.enqueueLarge(Item);
     };
     auto LargeSuccessCb = [this](const LargeBlock::SavedHeader& Item) -> void {
       Allocator->recycleChunk(Item);
     };
+    #ifdef NO_FAILED_FREES
+      auto SmallFailureCb = SmallSuccessCb;
+      auto LargeFailureCb = LargeSuccessCb;
+    #else
+      auto SmallFailureCb =
+        [&FailedFrees](const SavedSmallAlloc& Item) -> void { FailedFrees.enqueueSmall(Item); };
+      auto LargeFailureCb = [&FailedFrees](const LargeBlock::SavedHeader& Item) -> void {
+        FailedFrees.enqueueLarge(Item);
+      };
+    #endif
     auto SmallMarked = [this](uptr Ptr, uptr Size) -> bool {
       return !SmallShadowMap.allZero(Ptr, Ptr+Size);
     };
