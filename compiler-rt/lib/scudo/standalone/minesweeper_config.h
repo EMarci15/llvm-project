@@ -30,6 +30,7 @@ namespace scudo {
   constexpr bool NoQuarantine = false;
 // #define NO_SWEEP
 // #define NO_FAILED_FREES
+// #define NO_ACTIVE_PAGES
 }
 
 #endif // SCUDO_MINESWEEPER_CONFIG_H_

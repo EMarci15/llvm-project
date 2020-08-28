@@ -12,6 +12,7 @@
 #include "bitvector.h"
 #include "common.h"
 #include "list.h"
+#include "minesweeper_config.h"
 #include "mutex.h"
 
 namespace scudo {
@@ -31,8 +32,10 @@ public:
     releasePagesToOS(BaseAddress, From, Size, Data);
     ReleasedRangesCount++;
     ReleasedBytes += Size;
-    if (ActivePages)
-      ActivePages->clear(BaseAddress+From, BaseAddress+To);
+    #ifndef NO_ACTIVE_PAGES
+      if (ActivePages)
+        ActivePages->clear(BaseAddress+From, BaseAddress+To);
+    #endif
   }
 
 private:

@@ -103,7 +103,9 @@ public:
     if (SupportsMemoryTagging)
       UseMemoryTagging = systemSupportsMemoryTagging();
 
-    activePages.init(PrimaryBase, PrimarySize, PageSizeLog);
+    #ifndef NO_ACTIVE_PAGES
+      activePages.init(PrimaryBase, PrimarySize, PageSizeLog);
+    #endif
   }
   void init(s32 ReleaseToOsInterval) {
     memset(this, 0, sizeof(*this));
@@ -128,10 +130,12 @@ public:
     }
     DCHECK_GT(B->getCount(), 0);
     Region->Stats.PoppedBlocks += B->getCount();
-    if (Region->CanRelease) {
-      for (u32 I = 0; I < B->getCount(); I++)
-        activePages.set((uptr)B->get(I));
-    }
+    #ifndef NO_ACTIVE_PAGES
+      if (Region->CanRelease) {
+        for (u32 I = 0; I < B->getCount(); I++)
+          activePages.set((uptr)B->get(I));
+      }
+    #endif
 
     return B;
   }
@@ -241,13 +245,17 @@ public:
   }
 
   void activatePage(uptr page, uptr ClassId) {
-    ScopedLock L(getRegionInfo(ClassId)->Mutex);
-    activePages.set(page);
+    #ifndef NO_ACTIVE_PAGES
+      ScopedLock L(getRegionInfo(ClassId)->Mutex);
+      activePages.set(page);
+    #endif
   }
 
   void deactivatePage(uptr Ptr, uptr ClassId) {
-    ScopedLock L(getRegionInfo(ClassId)->Mutex);
-    activePages.clear(Ptr);
+    #ifndef NO_ACTIVE_PAGES
+      ScopedLock L(getRegionInfo(ClassId)->Mutex);
+      activePages.clear(Ptr);
+    #endif
   }
 
   bool useMemoryTagging() const {
