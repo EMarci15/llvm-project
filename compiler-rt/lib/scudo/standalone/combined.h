@@ -998,7 +998,8 @@ private:
     // than the maximum allowed, we return a chunk directly to the backend.
     // Logical Or can be short-circuited, which introduces unnecessary
     // conditional jumps, so use bitwise Or and let the compiler be clever.
-    const bool BypassQuarantine = !Quarantine.getCacheSize() | !Size;
+    const bool BypassQuarantine = NoQuarantine ? true
+                                    : (!Quarantine.getCacheSize() | !Size);
     if (BypassQuarantine) {
       NewHeader.State = Chunk::State::Available;
       Chunk::compareExchangeHeader(Cookie, Ptr, &NewHeader, Header);

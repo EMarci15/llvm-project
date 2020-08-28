@@ -26,6 +26,10 @@ namespace scudo {
   constexpr uptr ImmediateReleaseMinSize = 4096 * 4;
   constexpr bool MinesweeperUnmapping = true;
   constexpr bool MinesweeperZeroing = true;
+
+  constexpr bool NoQuarantine = false;
+// #define NO_SWEEP
+// #define NO_FAILED_FREES
 }
 
 #endif // SCUDO_MINESWEEPER_CONFIG_H_
