@@ -20,7 +20,7 @@ namespace scudo {
   constexpr bool IgnoreFailedFreeSize = true;
   constexpr uptr SmallGranuleSizeLog = 5; // 32B
   constexpr bool SingleThread = false;
-  constexpr uptr BackStopThreshold = 5;
+  constexpr uptr BackStopThreshold = 2;
   constexpr uptr MB = 1024*1024;
   constexpr uptr BackStopLeeway = 100*MB;
   constexpr uptr ImmediateReleaseMinSize = 4096 * 4;
