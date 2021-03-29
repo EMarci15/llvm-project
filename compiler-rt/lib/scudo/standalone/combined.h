@@ -21,6 +21,7 @@
 #include "report.h"
 #include "secondary.h"
 #include "stack_depot.h"
+#include "stop_the_world.h"
 #include "string_utils.h"
 #include "tsd.h"
 
@@ -53,9 +54,14 @@ public:
   typedef Allocator<Params, PostInitCallback> ThisT;
   typedef typename Params::template TSDRegistryT<ThisT> TSDRegistryT;
 
+	stop_the_world::StopTheWorld stw;
+i
+
   void callPostInitCallback() {
     static pthread_once_t OnceControl = PTHREAD_ONCE_INIT;
     pthread_once(&OnceControl, PostInitCallback);
+
+		stw.addThread(pthread_self());
   }
 
   typedef GlobalQuarantine<ThisT, void> QuarantineT;
@@ -95,6 +101,7 @@ public:
 
     Quarantine.init(this, static_cast<uptr>(getFlags()->thread_local_quarantine_size_kb << 10));
     MemRangeRegistry.init();
+		stw.init(this);
   }
 
   // Initialize the embedded GWP-ASan instance. Requires the main allocator to
@@ -655,6 +662,21 @@ public:
     Secondary.iterateOverBlocks(SecondaryLambda);
     MemRangeRegistry.iterateRanges(Callback);
   }
+
+	template<typename f>
+	void iterateOverRegions(f Callback) {
+    initThreadMaybe();
+    const auto SecondaryLambda = [Callback](uptr Ptr) -> void {
+        LargeBlock::Header* H = LargeBlock::getHeader(Ptr);
+        uptr End = H->BlockEnd;
+        uptr Size = End - Ptr;
+        Callback(Ptr, Size);
+    };
+
+    Primary.iterateOverRegions(Callback);
+    Secondary.iterateOverBlocks(SecondaryLambda);
+    MemRangeRegistry.iterateRanges(Callback);
+	}
 
   uptr getTotalAllocatedUser() {
     return Primary.getTotalActiveUser() + Secondary.getTotalAllocatedUser();

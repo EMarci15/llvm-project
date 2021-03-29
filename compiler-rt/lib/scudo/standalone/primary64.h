@@ -194,6 +194,15 @@ public:
     }
   }
 
+	template <typename F> void iterateOverRegions(F Callback) {
+    for (uptr I = 0; I < NumClasses; I++) {
+			if (I == SizeClassMap::BatchClassId)
+				continue;
+			const RegionInfo *Region = getRegionInfo(I);
+			Callback(Region->RegionBeg, Region->Allocateduser);
+		}
+	}
+
   void getStats(ScopedString *Str) {
     // TODO(kostyak): get the RSS per region.
     uptr TotalMapped = 0;

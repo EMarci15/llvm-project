@@ -499,26 +499,10 @@ private:
   void NOINLINE doSweepAndRecycle() {
     CacheT ToCheck = gatherContents();
     atomic_store_relaxed(&FailedFreeSize, 0);
-    
+
     AddrLimits SmallLimits = ToCheck.SmallCache.addrLimits();
     AddrLimits LargeLimits = ToCheck.LargeCache.addrLimits();
-    doSweepAndMark(SmallLimits, LargeLimits);
 
-    CacheT FailedFrees;
-    FailedFrees.init();
-    recycleUnmarked(FailedFrees, ToCheck);
-    Allocator->postSweepCleanup();
-
-    Cache.transfer(&FailedFrees); // Reinsert failed frees
-    atomic_store_relaxed(&FailedFreeSize, FailedFrees.getSize());
-    SmallShadowMap.clear();
-    LargeShadowMap.clear();
-
-    DCHECK(ToCheck.empty());
-    FailedFrees.LargeCache.deallocateBatches();
-  }
-
-  inline void doSweepAndMark(const AddrLimits& SmallLimits, const AddrLimits& LargeLimits) {
     auto MarkingLambda = [&](uptr Ptr, uptr Size) -> void {
       uptr* const Begin = (uptr*) Ptr;
       uptr* const End = (uptr*) (Ptr + Size);
@@ -534,7 +518,28 @@ private:
       }
     };
 
-    Allocator->iterateOverActiveMemory(MarkingLambda);
+		// First (parallel) marking phase
+		if (!SingleThread && StopWorldForSweep)
+			StopTheWorld::Instance->protectHeap();
+		Allocator->iterateOverActiveMemory(MarkingLambda);
+
+		// Second (stop-the-world) marking phase on dirty pages
+		if (!SingleThread && StopWorldForSweep) {
+			StopTheWorld::Instance->iterateOverDirtyAtomic(MarkingLambda);
+		}
+
+    CacheT FailedFrees;
+    FailedFrees.init();
+    recycleUnmarked(FailedFrees, ToCheck);
+    Allocator->postSweepCleanup();
+
+    Cache.transfer(&FailedFrees); // Reinsert failed frees
+    atomic_store_relaxed(&FailedFreeSize, FailedFrees.getSize());
+    SmallShadowMap.clear();
+    LargeShadowMap.clear();
+
+    DCHECK(ToCheck.empty());
+    FailedFrees.LargeCache.deallocateBatches();
   }
 
   inline CacheT gatherContents() {

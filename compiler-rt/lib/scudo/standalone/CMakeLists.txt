@@ -75,6 +75,8 @@ set(SCUDO_HEADERS
   secondary.h
   size_class_map.h
   stats.h
+	stop_the_world.h
+	stop_the_world_impl.h
   string_utils.h
   tsd.h
   tsd_exclusive.h
@@ -97,6 +99,7 @@ set(SCUDO_SOURCES
   proc_maps_parse.cpp
   release.cpp
   report.cpp
+	stop_the_world.cpp
   string_utils.cpp
   )
 
