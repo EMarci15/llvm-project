@@ -199,7 +199,7 @@ public:
 			if (I == SizeClassMap::BatchClassId)
 				continue;
 			const RegionInfo *Region = getRegionInfo(I);
-			Callback(Region->RegionBeg, Region->Allocateduser);
+			Callback(Region->RegionBeg, Region->AllocatedUser);
 		}
 	}
 
@@ -316,6 +316,17 @@ public:
     return B;
   }
 
+  bool InAllocdRegion(uptr p) {
+    uptr offset = p - PrimaryBase;
+    uptr I = offset / RegionSize;
+
+    if (offset > PrimarySize) return false;
+    RegionInfo *Region = getRegionInfo(I);
+
+    DCHECK((p >= Region->RegionBeg) && (p < Region->RegionBeg + RegionSize));
+    return ((offset % RegionSize) < Region->AllocatedUser);
+  }
+
 private:
   static const uptr RegionSize = 1UL << RegionSizeLog;
   static const uptr NumClasses = SizeClassMap::NumClasses;
@@ -364,7 +375,7 @@ private:
   atomic_s32 ReleaseToOsIntervalMs;
   bool UseMemoryTagging;
   alignas(SCUDO_CACHE_LINE_SIZE) RegionInfo RegionInfoArray[NumClasses];
-  alignas(SCUDO_CACHE_LINE_SIZE) ShadowBitMap activePages;
+  alignas(SCUDO_CACHE_LINE_SIZE) ShadowT activePages;
   atomic_uptr TotalActiveUser;
 
   RegionInfo *getRegionInfo(uptr ClassId) {

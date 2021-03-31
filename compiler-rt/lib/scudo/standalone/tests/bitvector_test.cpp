@@ -32,35 +32,6 @@ TEST(ScudoBitvectorTest, SetGet) {
   EXPECT_FALSE(v[Index+1]);
 }
 
-TEST(ScudoBitvectorTest, RangeClear) {
-  scudo::BitVector v;
-  v.init(4*4096*8); // 4 pages
-
-  const uptr StartIndex = 40000;
-  const uptr StartClearIndex = 40075;
-  const uptr EndClearIndex = 40920;
-  const uptr EndIndex = 41000;
-
-  for (uptr Index = StartIndex; Index < EndIndex; Index++) {
-    EXPECT_FALSE(v[Index]);
-    v.set(Index);
-  }
-
-  EXPECT_FALSE(v[StartIndex-1]);
-  for (uptr Index = StartIndex; Index < EndIndex; Index++) {
-    EXPECT_TRUE(v[Index]);
-  }
-  EXPECT_FALSE(v[EndIndex]);
-
-  v.clear(StartClearIndex, EndClearIndex);
-  
-  EXPECT_FALSE(v[StartIndex-1]);
-  for (uptr Index = StartClearIndex; Index <= EndClearIndex; Index++) {
-    EXPECT_FALSE(v[Index]);
-  }
-  EXPECT_FALSE(v[EndIndex]);
-}
-
 TEST(ScudoBitvectorTest, AllZero) {
   scudo::BitVector v;
   v.init(4*4096*8); // 4 pages
@@ -72,10 +43,9 @@ TEST(ScudoBitvectorTest, AllZero) {
 
   for (uptr Index = StartIndex; Index <= EndIndex; Index++) {
     EXPECT_FALSE(v[Index]);
-    v.set(Index);
+    if ((Index < StartClearIndex) || (Index >= EndClearIndex))
+      v.set(Index);
   }
-
-  v.clear(StartClearIndex, EndClearIndex);
 
   // Start
   EXPECT_TRUE(v.allZero(StartIndex-10, StartIndex-10));
@@ -107,8 +77,6 @@ TEST(ScudoBitvectorTest, Large) {
   v.init(100000ull*4096*8); // 100000 pages
 
   const uptr StartIndex = 100000;
-  const uptr StartClearIndex = 10100;
-  const uptr EndClearIndex = 199900;
   const uptr EndIndex = 200000;
   const uptr Stride = 100;
 
@@ -117,15 +85,9 @@ TEST(ScudoBitvectorTest, Large) {
     v.set(Index);
     EXPECT_TRUE(v[Index]);
   }
-
-  v.clear(StartClearIndex, EndClearIndex);
   
   for (uptr Index = StartIndex; Index <= EndIndex; Index+=Stride) {
-    if ((Index < StartClearIndex) || (Index > EndClearIndex)) {
-      EXPECT_TRUE(v[Index]);
-    } else {
-      EXPECT_FALSE(v[Index]);
-    }
+    EXPECT_TRUE(v[Index]);
   }
 }
 

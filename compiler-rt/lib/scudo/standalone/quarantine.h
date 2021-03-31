@@ -300,7 +300,6 @@ template <typename AllocatorT, typename Node> class GlobalQuarantine {
 public:
   typedef QuarantineCache CacheT;
   typedef GlobalQuarantine<AllocatorT, Node> ThisT;
-  typedef ShadowBitMap ShadowT;
 
   void initLinkerInitialized(uptr CacheSize) {
     atomic_store_relaxed(&MaxCacheSize, CacheSize);
@@ -518,15 +517,16 @@ private:
       }
     };
 
-		// First (parallel) marking phase
-		if (!SingleThread && StopWorldForSweep)
-			StopTheWorld::Instance->protectHeap();
-		Allocator->iterateOverActiveMemory(MarkingLambda);
+    // First (parallel) marking phase
+    if (!SingleThread && StopWorldForSweep)
+      Allocator->stw.protectHeap();
+    Allocator->iterateOverActiveMemory(MarkingLambda);
 
-		// Second (stop-the-world) marking phase on dirty pages
-		if (!SingleThread && StopWorldForSweep) {
-			StopTheWorld::Instance->iterateOverDirtyAtomic(MarkingLambda);
-		}
+    // Second (stop-the-world) marking phase on dirty pages
+    if (!SingleThread && StopWorldForSweep) {
+      Allocator->stw.iterateOverDirtyAtomic(MarkingLambda);
+      Allocator->stw.unprotectHeap();
+    }
 
     CacheT FailedFrees;
     FailedFrees.init();

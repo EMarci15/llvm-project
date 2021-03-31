@@ -198,7 +198,8 @@ enum FillContentsMode {
                         // zero-initialized already.
 };
 
-constexpr uptr MIN_HEAP_ADDR = 0;
+// XXX vm.mmap_min_addr and 2^(# of bits in virtual addresses)
+constexpr uptr MIN_HEAP_ADDR = (((uptr)1)<<16);
 constexpr uptr MAX_HEAP_ADDR = (((uptr)1)<<47);
 
 struct AddrLimits {
