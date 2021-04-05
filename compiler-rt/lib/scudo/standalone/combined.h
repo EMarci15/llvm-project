@@ -60,7 +60,8 @@ public:
     static pthread_once_t OnceControl = PTHREAD_ONCE_INIT;
     pthread_once(&OnceControl, PostInitCallback);
 
-    stw.addThread(pthread_self());
+    if (!Quarantine.CurThreadSweeper())
+      stw.addThread(pthread_self());
   }
 
   void unprotect() { Secondary.setUnprotected(); }

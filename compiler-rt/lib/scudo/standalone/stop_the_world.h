@@ -14,14 +14,6 @@
 
 namespace scudo {
 
-inline void PROTECT(uptr addr, uptr len) {
-  CHECK(!mprotect((void*)(addr), (size_t)(len), PROT_READ));
-}
-
-inline void UNPROTECT(uptr addr, uptr len) {
-  CHECK(!mprotect((void*)(addr), (size_t)(len), (PROT_READ | PROT_WRITE)));
-}
-
 class StopTheWorldBase {
 protected:
   atomic_u32 threadCount;
@@ -50,9 +42,9 @@ public:
     return instance;
   }
 
-  void sigsegv(uptr addr);
   void sigsus();
   void addDirtyPage(uptr addr);
+  void addThread(pthread_t thd);
 
   virtual bool allocd(uptr p) = 0;
 
@@ -64,7 +56,6 @@ class StopTheWorld : public StopTheWorldBase {
   AllocatorT *Allocator;
 public:
   void init(AllocatorT *_allocator);
-  void addThread(pthread_t thd);
   void protectHeap();
   void unprotectHeap();
   void stop();
@@ -90,39 +81,29 @@ template<typename AllocatorT> void StopTheWorld<AllocatorT>::init(AllocatorT *_a
 }
 
 template<typename AllocatorT>
-void StopTheWorld<AllocatorT>::addThread(pthread_t thd) {
-  ScopedLock L(threadsLock);
-
-  threads[atomic_load_relaxed(&threadCount)] = thd;
-  atomic_fetch_add(&threadCount, 1, memory_order_release);
-
-  // TODO
-}
-
-template<typename AllocatorT>
 bool StopTheWorld<AllocatorT>::allocd(uptr ptr) {
   return Allocator->allocd(ptr);
 }
 
 template<typename AllocatorT>
 void StopTheWorld<AllocatorT>::protectHeap() {
-  Allocator->iterateOverRegions(PROTECT, true);
+  // TODO
 }
 
 template<typename AllocatorT>
 void StopTheWorld<AllocatorT>::unprotectHeap() {
-  Allocator->unprotect();
-  Allocator->iterateOverRegions(UNPROTECT);
+  // TODO
   atomic_store(&dirtyPageCount, 0, memory_order_release);
 }
 
 template<typename AllocatorT>
 void StopTheWorld<AllocatorT>::stop() {
+  // outputRaw("stop()\n");
   uint32_t tc = atomic_load(&threadCount, memory_order_acquire);
 
   atomic_fetch_add(&StopCount, 1, memory_order_seq_cst);
   for (uint32_t i = 0; i < tc; i++)
-    pthread_kill(threads[i], SIG_STOP_WORLD);
+    CHECK(!pthread_kill(threads[i], SIG_STOP_WORLD));
 
   while (atomic_load(&StoppedThreads, memory_order_acquire) < tc)
     pthread_yield();
@@ -130,11 +111,12 @@ void StopTheWorld<AllocatorT>::stop() {
 
 template<typename AllocatorT>
 void StopTheWorld<AllocatorT>::resume() {
+  // outputRaw("resume()\n");
   uint32_t tc = atomic_load(&threadCount, memory_order_acquire);
 
   atomic_fetch_add(&StopCount, 1, memory_order_seq_cst);
   for (uint32_t i = 0; i < tc; i++)
-    pthread_kill(threads[i], SIG_RESUME_WORLD);
+    CHECK(!pthread_kill(threads[i], SIG_RESUME_WORLD));
 
   atomic_store(&StoppedThreads, 0, memory_order_relaxed);
 }

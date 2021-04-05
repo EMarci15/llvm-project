@@ -198,7 +198,8 @@ public:
     for (uptr I = 0; I < NumClasses; I++) {
 			if (I == SizeClassMap::BatchClassId)
 				continue;
-			const RegionInfo *Region = getRegionInfo(I);
+			RegionInfo *Region = getRegionInfo(I);
+      ScopedLock L(Region->Mutex);
 			Callback(Region->RegionBeg, Region->AllocatedUser);
 		}
 	}
@@ -318,13 +319,13 @@ public:
 
   bool InAllocdRegion(uptr p) {
     uptr offset = p - PrimaryBase;
-    uptr I = offset / RegionSize;
+    uptr I = (offset / RegionSize);
 
     if (offset > PrimarySize) return false;
     RegionInfo *Region = getRegionInfo(I);
 
-    DCHECK((p >= Region->RegionBeg) && (p < Region->RegionBeg + RegionSize));
-    return ((offset % RegionSize) < Region->AllocatedUser);
+    CHECK((p >= Region->RegionBeg) && (p < Region->RegionBeg + RegionSize));
+    return ((p - Region->RegionBeg) < Region->AllocatedUser);
   }
 
 private:

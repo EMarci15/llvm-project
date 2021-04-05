@@ -421,6 +421,10 @@ public:
     }
   }
 
+  inline bool CurThreadSweeper() {
+    return (pthread_self() == SweeperThread);
+  }
+
 private:
   // Read-only data.
   alignas(SCUDO_CACHE_LINE_SIZE) HybridMutex CacheMutex;

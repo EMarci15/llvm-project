@@ -422,8 +422,7 @@ void *MapAllocator<CacheT>::allocate(uptr Size, uptr AlignmentHint,
 
         if (HeapProtected) {
           // Register the pages of the object as dirty on access
-          PROTECT((uptr)Ptr, BlockSize);
-          // TODO Add smaller ones to dirtyPages straight away?
+          // TODO?
         }
       }
       return Ptr;
@@ -489,8 +488,7 @@ void *MapAllocator<CacheT>::allocate(uptr Size, uptr AlignmentHint,
 
     if (HeapProtected) {
       // Register the pages of the object as dirty
-      PROTECT(Ptr, CommitSize);
-      // TODO Add smaller ones to dirtyPages straight away?
+      // TODO?
     }
   }
   return reinterpret_cast<void *>(Ptr + LargeBlock::getHeaderSize());
@@ -546,6 +544,8 @@ template <class CacheT> LargeBlock::SavedHeader MapAllocator<CacheT>::decommit(v
 
   Mutex.unlock();
 
+  AllocatedPages.clear((uptr)H, H->BlockEnd);
+
   LargeBlock::SavedHeader Save;
   Save.Block = Block;
   Save.BlockEnd = H->BlockEnd;
@@ -560,7 +560,6 @@ template <class CacheT> LargeBlock::SavedHeader MapAllocator<CacheT>::decommit(v
     memset((void*)Block, 0, Save.BlockEnd - Block);
   }
 
-  AllocatedPages.clear((uptr)H, H->BlockEnd);
   return Save;
 }
 
