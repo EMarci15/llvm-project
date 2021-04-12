@@ -521,6 +521,33 @@ private:
       }
     };
 
+    uptr DirtyCount = 0, CleanCount = 0;
+    uptr PageSize = getPageSizeCached();
+    auto DirtyMarkingLambda = [&](uptr Ptr, uptr Size) -> void {
+      uptr const End = Ptr + Size;
+      uptr NextPage;
+
+      for (uptr Page = Ptr; Page < End; Page = NextPage) {
+        NextPage = ((Page + PageSize) & ~(PageSize-1));
+        if (!Allocator->stw.isPageDirty(NextPage - PageSize)) {
+          CleanCount++;
+          continue; // Skip clean page
+        } else DirtyCount++;
+        for (uptr *Word = (uptr*)Page;
+             ((uptr)Word < NextPage) && ((uptr)Word < End);
+             Word++) {
+          // Shift by header size to correctly associate end() pointers with the previous chunk
+          uptr Target = (*Word) - Chunk::getHeaderSize();
+          // Only mark if Target is in the plausible range
+          if (SmallLimits.contains(Target)) {
+            SmallShadowMap.set(Target);
+          } else if (LargeLimits.contains(Target)) {
+            LargeShadowMap.set(Target);
+          }
+        }
+      }
+    };
+
     // First (parallel) marking phase
     if (!SingleThread && StopWorldForSweep)
       Allocator->stw.protectHeap();
@@ -528,8 +555,11 @@ private:
 
     // Second (stop-the-world) marking phase on dirty pages
     if (!SingleThread && StopWorldForSweep) {
-      Allocator->stw.iterateOverDirtyAtomic(MarkingLambda);
-      Allocator->stw.unprotectHeap();
+      Allocator->stw.stop();
+      Allocator->iterateNoLock(DirtyMarkingLambda);
+      Allocator->stw.resume();
+      //printf("###### Rescan done; Dirty: %llu Clean: %llu\n",
+      //        DirtyCount, CleanCount);
     }
 
     CacheT FailedFrees;

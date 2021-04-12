@@ -8,12 +8,12 @@ NOINLINE static void save_caller_regs() { asm(""); }
 
 extern "C" {
 static void suspend_handler(int sig, siginfo_t *si, void *raw_sc) {
-  //outputRaw("suspend_handler()\n");
+//  outputRaw("suspend_handler()\n");
   StopTheWorldBase::Instance()->sigsus();
 }
 
 static void resume_handler(int sig, siginfo_t *si, void *raw_sc) {
-  //outputRaw("resume_handler()\n");
+//  outputRaw("resume_handler()\n");
   // Do nothing, resumes suspend_handler on sigsuspend
 }
 };
@@ -64,12 +64,6 @@ inline void StopTheWorldBase::sigsus() {
     DCHECK(errno == EINTR);
     sc = atomic_load_relaxed(&StopCount);
   } while (sc % 2);
-}
-
-void StopTheWorldBase::addDirtyPage(uptr addr) {
-  uint32_t ind = atomic_fetch_add(&dirtyPageCount, (u32)1,
-                                              memory_order_relaxed);
-  dirtyPages[ind] = addr;
 }
 
 };

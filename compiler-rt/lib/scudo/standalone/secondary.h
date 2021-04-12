@@ -278,26 +278,16 @@ private:
 
 template <class CacheT> class MapAllocator {
   using ThisT = MapAllocator<CacheT>;
-
-  AtomicShadowT AllocatedPages;
-  bool HeapProtected;
 public:
   void initLinkerInitialized(GlobalStats *S, s32 ReleaseToOsInterval = -1) {
     Cache.initLinkerInitialized(ReleaseToOsInterval);
     Stats.initLinkerInitialized();
     if (LIKELY(S))
       S->link(&Stats);
-    uptr PageSizeLog = getLog2(getPageSizeCached());
-    AllocatedPages.init(MIN_HEAP_ADDR, MAX_HEAP_ADDR - MIN_HEAP_ADDR, PageSizeLog);
   }
   void init(GlobalStats *S, s32 ReleaseToOsInterval = -1) {
     memset(this, 0, sizeof(*this));
     initLinkerInitialized(S, ReleaseToOsInterval);
-  }
-
-  bool allocd(uptr ptr) {
-    if ((ptr < MIN_HEAP_ADDR) || (ptr >= MAX_HEAP_ADDR)) return false;
-    return AllocatedPages.get(ptr);
   }
 
   void *allocate(uptr Size, uptr AlignmentHint = 0, uptr *BlockEnd = nullptr,
@@ -329,10 +319,8 @@ public:
     IterMutex.unlock();
   }
 
-  void setUnprotected() { ScopedLock L(Mutex); HeapProtected = false; }
-
   template <typename F>
-    void iterateOverBlocks(F Callback, bool SetProtected = false) {
+    void iterateOverBlocks(F Callback) {
     ScopedLock L(IterMutex);
     LargeBlock::Header *H;
     {
@@ -347,8 +335,17 @@ public:
         ScopedLock L(Mutex);
         H = H->Next;
         IterBlock = H;
-        if (!H && SetProtected) HeapProtected = true;
       }
+    }
+  }
+
+  template <typename F>
+    void iterateNoLock(F Callback) {
+    LargeBlock::Header *H;
+    H = InUseBlocks.front();
+    while (H) {
+      Callback(reinterpret_cast<uptr>(H) + LargeBlock::getHeaderSize());
+      H = H->Next;
     }
   }
 
@@ -411,7 +408,6 @@ void *MapAllocator<CacheT>::allocate(uptr Size, uptr AlignmentHint,
       void *Ptr = reinterpret_cast<void *>(reinterpret_cast<uptr>(H) +
                                            LargeBlock::getHeaderSize());
       const uptr BlockSize = H->BlockEnd - reinterpret_cast<uptr>(H);
-      AllocatedPages.set((uptr)Ptr, H->BlockEnd);
       {
         ScopedLock L(Mutex);
         InUseBlocks.push_back(H);
@@ -419,11 +415,6 @@ void *MapAllocator<CacheT>::allocate(uptr Size, uptr AlignmentHint,
         NumberOfAllocs++;
         Stats.add(StatAllocated, BlockSize);
         Stats.add(StatMapped, H->MapSize);
-
-        if (HeapProtected) {
-          // Register the pages of the object as dirty on access
-          // TODO?
-        }
       }
       return Ptr;
     }
@@ -475,7 +466,6 @@ void *MapAllocator<CacheT>::allocate(uptr Size, uptr AlignmentHint,
   H->Data = Data;
   if (BlockEnd)
     *BlockEnd = CommitBase + CommitSize;
-  AllocatedPages.set((uptr)Ptr, H->BlockEnd);
   {
     ScopedLock L(Mutex);
     InUseBlocks.push_back(H);
@@ -485,11 +475,6 @@ void *MapAllocator<CacheT>::allocate(uptr Size, uptr AlignmentHint,
     NumberOfAllocs++;
     Stats.add(StatAllocated, CommitSize);
     Stats.add(StatMapped, H->MapSize);
-
-    if (HeapProtected) {
-      // Register the pages of the object as dirty
-      // TODO?
-    }
   }
   return reinterpret_cast<void *>(Ptr + LargeBlock::getHeaderSize());
 }
@@ -514,7 +499,6 @@ template <class CacheT> void MapAllocator<CacheT>::deallocate(void *Ptr) {
   void *Addr = reinterpret_cast<void *>(H->MapBase);
   const uptr Size = H->MapSize;
   MapPlatformData Data = H->Data;
-  AllocatedPages.clear((uptr)H, H->BlockEnd);
   unmap(Addr, Size, UNMAP_ALL, &Data);
 }
 
@@ -543,8 +527,6 @@ template <class CacheT> LargeBlock::SavedHeader MapAllocator<CacheT>::decommit(v
   Stats.sub(StatMapped, H->MapSize);
 
   Mutex.unlock();
-
-  AllocatedPages.clear((uptr)H, H->BlockEnd);
 
   LargeBlock::SavedHeader Save;
   Save.Block = Block;

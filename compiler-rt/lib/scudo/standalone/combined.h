@@ -64,8 +64,6 @@ public:
       stw.addThread(pthread_self());
   }
 
-  void unprotect() { Secondary.setUnprotected(); }
-
   typedef GlobalQuarantine<ThisT, void> QuarantineT;
   typedef typename QuarantineT::CacheT QuarantineCacheT;
 
@@ -666,7 +664,7 @@ public:
   }
 
   template<typename f>
-  void iterateOverRegions(f Callback, bool MarkSecondaryProtected = false) {
+  void iterateNoLock(f Callback) {
     initThreadMaybe();
     const auto SecondaryLambda = [Callback](uptr Ptr) -> void {
         LargeBlock::Header* H = LargeBlock::getHeader(Ptr);
@@ -675,13 +673,9 @@ public:
         Callback(Ptr, Size);
     };
 
-    Primary.iterateOverRegions(Callback);
-    Secondary.iterateOverBlocks(SecondaryLambda, MarkSecondaryProtected);
+    Primary.iterateNoLock(Callback);
+    Secondary.iterateNoLock(SecondaryLambda);
     MemRangeRegistry.iterateRanges(Callback);
-  }
-
-  bool allocd(uptr ptr) {
-    return Primary.InAllocdRegion(ptr) || Secondary.allocd(ptr);
   }
 
   uptr getTotalAllocatedUser() {

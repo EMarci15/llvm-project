@@ -194,13 +194,12 @@ public:
     }
   }
 
-	template <typename F> void iterateOverRegions(F Callback) {
+	template <typename F> void iterateNoLock(F Callback) {
     for (uptr I = 0; I < NumClasses; I++) {
 			if (I == SizeClassMap::BatchClassId)
 				continue;
 			RegionInfo *Region = getRegionInfo(I);
-      ScopedLock L(Region->Mutex);
-			Callback(Region->RegionBeg, Region->AllocatedUser);
+  	  Callback(Region->RegionBeg, Region->AllocatedUser);
 		}
 	}
 
@@ -315,17 +314,6 @@ public:
         B.BlockBegin -= B.BlockSize;
     }
     return B;
-  }
-
-  bool InAllocdRegion(uptr p) {
-    uptr offset = p - PrimaryBase;
-    uptr I = (offset / RegionSize);
-
-    if (offset > PrimarySize) return false;
-    RegionInfo *Region = getRegionInfo(I);
-
-    CHECK((p >= Region->RegionBeg) && (p < Region->RegionBeg + RegionSize));
-    return ((p - Region->RegionBeg) < Region->AllocatedUser);
   }
 
 private:
